@@ -2257,6 +2257,14 @@ def convert_geometries(
         device=model.device,
     )
 
+	# Compute total number of required contacts per world from shape-pair
+    # geometry so the resulting metadata invariant is independent of
+    # ``model.rigid_contact_max``. Sizing knobs live in the contact-capacity
+    # resolver (:func:`resolve_contact_capacity`) and take
+    # ``model.rigid_contact_max`` into account only for the external-Newton
+    # policy.
+    #model_min_contacts, world_min_contacts = compute_required_contact_capacity(model)
+    
     # Compute total number of required contacts per world
     if model.rigid_contact_max is not None:
         model_min_contacts = int(model.rigid_contact_max)

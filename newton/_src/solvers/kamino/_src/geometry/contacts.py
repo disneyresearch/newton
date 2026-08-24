@@ -43,6 +43,7 @@ from ..core.types import (
     to_warp_int32_array,
 )
 from ..utils import logger as msg
+from .contact_capacity import ContactCapacity
 from .keying import build_pair_key2
 
 ###
@@ -507,7 +508,7 @@ class ContactsKamino:
     def __init__(
         self,
         model: ModelKamino | None = None,
-        capacity: int | list[int] | None = None,
+        capacity: int | list[int] | ContactCapacity | None = None,
         default_max_contacts: int | None = None,
         device: wp.DeviceLike = None,
         remappable: bool = False,
@@ -524,8 +525,12 @@ class ContactsKamino:
                 allocating data, and can be finalized later by providing model/capacity to `finalize`.
             capacity:
                 The maximum number of contacts to allocate if no model is provided.
-                If an integer is provided, it specifies the capacity for a single world.
-                If a list of integers is provided, it specifies the capacity for each world.
+                Accepts three forms:
+                  * a :class:`ContactCapacity`, whose per-world entries are used verbatim
+                    (mixed zero/nonzero worlds stay literal), i.e. no defaulting is applied;
+                  * a list of integers, one per world (a raw ``0`` here still defaults to
+                    ``default_max_contacts`` for backwards compatibility);
+                  * a single integer for a single-world model (``0`` defaults, as above).
                 Cannot be specified together with `model`.
             default_max_contacts:
                 The default maximum number of contacts per world, if no model and no positive capacity
@@ -802,7 +807,7 @@ class ContactsKamino:
     def finalize(
         self,
         model: ModelKamino | None = None,
-        capacity: int | list[int] | None = None,
+        capacity: int | list[int] | ContactCapacity | None = None,
         device: wp.DeviceLike = None,
         remappable: bool = False,
     ):
@@ -816,8 +821,12 @@ class ContactsKamino:
                 Cannot be specified together with `capacity`.
             capacity:
                 The maximum number of contacts to allocate if no model is provided.
-                If an integer is provided, it specifies the capacity for a single world.
-                If a list of integers is provided, it specifies the capacity for each world.
+                Accepts three forms:
+                  * a :class:`ContactCapacity`, whose per-world entries are used verbatim
+                    (mixed zero/nonzero worlds stay literal, no defaulting);
+                  * a list of integers, one per world (a raw ``0`` here still defaults to
+                    ``default_max_contacts`` for backwards compatibility);
+                  * a single integer for a single-world model (``0`` defaults, as above).
                 Cannot be specified together with `model`.
             device:
                 The device on which to allocate the contacts data, if no model is provided.
@@ -853,8 +862,14 @@ class ContactsKamino:
         else:
             self._device = device
 
+        # If the capacity is already a resolved ContactCapacity, use it verbatim so
+        # mixed zero/nonzero worlds stay literal and no defaulting is applied.
+        if isinstance(capacity, ContactCapacity):
+            world_max_contacts = capacity.as_list()
+            model_max_contacts = capacity.model_max_contacts
+
         # If the capacity is a list, this means we are allocating for multiple worlds
-        if isinstance(capacity, list):
+        elif isinstance(capacity, list):
             if len(capacity) == 0:
                 raise ValueError("`capacity` must be an non-empty list")
             for i in range(len(capacity)):
@@ -875,7 +890,7 @@ class ContactsKamino:
             world_max_contacts = [capacity]
 
         else:
-            raise TypeError("`capacity` must be an integer or a list of integers")
+            raise TypeError("`capacity` must be an integer, a list of integers, or a ContactCapacity")
 
         # Skip allocation if there are no contacts to allocate
         if model_max_contacts == 0:

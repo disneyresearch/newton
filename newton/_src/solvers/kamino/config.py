@@ -101,19 +101,28 @@ class CollisionDetectorConfig(ConfigBase):
 
     max_contacts: int | None = None
     """
-    Model-wide cap on contact buffer capacity during collision-detector
-    initialization.\n
+    Model-wide cap on the internal collision-detector contact-buffer capacity.\n
+    Applies only when Kamino owns the collision-detector allocation
+    (``SolverKamino.Config.use_collision_detector=True``) or when the
+    detector is constructed standalone. Ignored for external Newton
+    collision detection, whose total is controlled by
+    :attr:`~newton._src.sim.model.Model.rigid_contact_max`.\n
     When ``max_contacts_per_world`` is None, the geometry-based estimate is
-    capped at this value; otherwise this field is ignored.\n
+    proportionally scaled down so its sum does not exceed this value;
+    otherwise this field is ignored.\n
     Defaults to ``None``, leaving the geometry-based estimate uncapped.
     """
 
     max_contacts_per_world: int | None = None
     """
-    Per-world contact buffer capacity override.\n
+    Uniform per-world override for the internal collision-detector
+    contact-buffer capacity.\n
+    Applies only when Kamino owns the collision-detector allocation.
     When set, allocates ``max_contacts_per_world`` contacts for every world
-    (``num_worlds * max_contacts_per_world`` total), bypassing the
-    geometry-based estimate and ``max_contacts``.\n
+    (``num_worlds * max_contacts_per_world`` total), taking precedence over
+    both the geometry-based estimate and ``max_contacts``. This is the
+    single highest-priority internal knob and is intended for tests and
+    memory-budgeted runs. Ignored for external Newton collision detection.\n
     Defaults to ``None``.
     """
 

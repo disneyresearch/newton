@@ -47,6 +47,11 @@ This module provides a front-end defined by:
 """
 
 from .aggregation import ContactAggregation, ContactAggregationData
+from .contact_capacity import (
+    ContactCapacity,
+    ContactCapacityPolicy,
+    resolve_contact_capacity,
+)
 from .contacts import ContactMode, ContactsKamino, ContactsKaminoData
 from .detector import (
     BroadPhaseType,
@@ -69,7 +74,10 @@ __all__ = [
     "CollisionPipelineUnifiedKamino",
     "ContactAggregation",
     "ContactAggregationData",
+    "ContactCapacity",
+    "ContactCapacityPolicy",
     "ContactMode",
     "ContactsKamino",
     "ContactsKaminoData",
+    "resolve_contact_capacity",
 ]

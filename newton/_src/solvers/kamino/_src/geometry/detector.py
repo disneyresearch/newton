@@ -34,6 +34,11 @@ from .....core.types import override
 from ...config import CollisionDetectorConfig
 from ..core.data import DataKamino
 from ..core.model import ModelKamino
+from ..geometry.contact_capacity import (
+    ContactCapacity,
+    ContactCapacityPolicy,
+    resolve_contact_capacity,
+)
 from ..geometry.contacts import ContactsKamino
 from ..geometry.primitive import CollisionPipelinePrimitive
 from ..geometry.unified import CollisionPipelineUnifiedKamino
@@ -146,86 +151,6 @@ class BroadPhaseType(IntEnum):
 
 
 ###
-# Contact capacity helpers
-###
-
-# Conservative heuristics for the fallback allocation path when pair-based
-# capacity metadata is unavailable (``model_minimum_contacts == 0``).
-_EXPLICIT_CONTACTS_PER_PAIR = 10
-_DYNAMIC_CONTACTS_PER_COLLIDABLE = 20
-
-
-def _cap_world_contacts_at_total(world_max_contacts: list[int], max_total: int) -> list[int]:
-    """Scale per-world contact budgets down so their sum does not exceed ``max_total``."""
-    total = sum(world_max_contacts)
-    if total <= max_total:
-        return list(world_max_contacts)
-    if max_total <= 0:
-        return [0] * len(world_max_contacts)
-
-    capped = [0] * len(world_max_contacts)
-    remainders: list[tuple[float, int]] = []
-    assigned = 0
-    for i, count in enumerate(world_max_contacts):
-        scaled = count * max_total / total
-        floor = int(scaled)
-        capped[i] = floor
-        assigned += floor
-        remainders.append((scaled - floor, i))
-    for _, i in sorted(remainders, key=lambda item: item[0], reverse=True):
-        if assigned >= max_total:
-            break
-        capped[i] += 1
-        assigned += 1
-    return capped
-
-
-def _estimate_fallback_world_max_contacts(
-    model: ModelKamino,
-    config: CollisionDetectorConfig,
-) -> list[int]:
-    """Estimate per-world contact capacity from geometry when pair metadata is unavailable."""
-    num_worlds = model.size.num_worlds
-    world_max_contacts = [0] * num_worlds
-
-    if config.broadphase == "explicit" and model.geoms.collidable_pairs is not None:
-        pairs = model.geoms.collidable_pairs.numpy()
-        wid = model.geoms.wid.numpy()
-        for pair in pairs:
-            g0, g1 = int(pair[0]), int(pair[1])
-            world_id = int(wid[g0]) if wid[g0] >= 0 else int(wid[g1])
-            if 0 <= world_id < num_worlds:
-                world_max_contacts[world_id] += _EXPLICIT_CONTACTS_PER_PAIR
-    else:
-        wid = model.geoms.wid.numpy()
-        group = model.geoms.group.numpy()
-        for geom_id in range(len(wid)):
-            world_id = int(wid[geom_id])
-            if 0 <= world_id < num_worlds and group[geom_id] > 0:
-                world_max_contacts[world_id] += _DYNAMIC_CONTACTS_PER_COLLIDABLE
-
-    return world_max_contacts
-
-
-def _resolve_contact_capacity(
-    model: ModelKamino,
-    config: CollisionDetectorConfig,
-) -> tuple[int, list[int]]:
-    """Resolve model- and per-world contact budgets from geometry and config caps."""
-    if model.geoms.model_minimum_contacts > 0:
-        world_max_contacts = list(model.geoms.world_minimum_contacts)
-    else:
-        world_max_contacts = _estimate_fallback_world_max_contacts(model, config)
-
-    model_max_contacts = sum(world_max_contacts)
-    if config.max_contacts is not None and model_max_contacts > config.max_contacts:
-        world_max_contacts = _cap_world_contacts_at_total(world_max_contacts, config.max_contacts)
-        model_max_contacts = sum(world_max_contacts)
-
-    return model_max_contacts, world_max_contacts
-
-
-###
 # Interfaces
 ###
 
@@ -263,6 +188,7 @@ class CollisionDetector:
         self,
         model: ModelKamino | None = None,
         config: CollisionDetector.Config | None = None,
+        capacity: ContactCapacity | None = None,
     ):
         """
         Initialize the CollisionDetector.
@@ -274,6 +200,11 @@ class CollisionDetector:
                 can be finalized later by providing a model to the `finalize` method.
             config: Config for the CollisionDetector.
                 If `None`, uses default config.
+            capacity: Optional pre-resolved :class:`ContactCapacity`. When provided, allocation
+                uses the supplied per-world buffers verbatim (skipping the standalone
+                :func:`resolve_contact_capacity` call). This is how :class:`SolverKamino`
+                shares a single resolver result across the detector, ``rigid_contact_max``, and
+                the contacts container.
         """
         # Declare the device cache
         self._device: wp.DeviceLike = None
@@ -298,7 +229,7 @@ class CollisionDetector:
 
         # Finalize the collision detector if a model is provided
         if model is not None:
-            self.finalize(model=model, config=config)
+            self.finalize(model=model, config=config, capacity=capacity)
 
     ###
     # Properties
@@ -342,6 +273,7 @@ class CollisionDetector:
         self,
         model: ModelKamino | None = None,
         config: CollisionDetector.Config | None = None,
+        capacity: ContactCapacity | None = None,
     ):
         """
         Allocates CollisionDetector data on the target device.
@@ -353,6 +285,9 @@ class CollisionDetector:
                 can be finalized later by providing a model to the `finalize` method.
             config: Config for the CollisionDetector.
                 If `None`, uses default config.
+            capacity: Optional pre-resolved :class:`ContactCapacity`. When provided the detector
+                uses its per-world entries directly instead of calling
+                :func:`resolve_contact_capacity` locally.
         """
         # Override the model if specified explicitly
         if model is not None:
@@ -381,17 +316,21 @@ class CollisionDetector:
         # Configure the collision detection pipeline type based on the config
         self._pipeline_type = CollisionPipelineType.from_string(self._config.pipeline)
 
-        # Resolve contact capacity.
-        if self._config.max_contacts_per_world is not None:
-            # Use the explicit per-world override when available.
-            num_worlds = self._model.size.num_worlds
-            per_world = self._config.max_contacts_per_world
-            self._world_max_contacts = [per_world] * num_worlds
-            self._model_max_contacts = per_world * num_worlds
-        else:
-            # Otherwise estimate per world from geometry.
-            # ``max_contacts`` caps the model total.
-            self._model_max_contacts, self._world_max_contacts = _resolve_contact_capacity(self._model, self._config)
+        # Resolve contact capacity. Callers (e.g. ``SolverKamino``) can supply a
+        # pre-resolved capacity so the whole allocation chain uses one budget.
+        # Standalone construction resolves with the full internal policy.
+        if capacity is None:
+            capacity = resolve_contact_capacity(
+                self._model,
+                newton_model=None,
+                config=self._config,
+                policy=ContactCapacityPolicy.INTERNAL_FULL,
+            )
+        elif not isinstance(capacity, ContactCapacity):
+            raise TypeError(f"Cannot finalize CollisionDetector: expected ContactCapacity, got {type(capacity)}")
+
+        self._world_max_contacts = capacity.as_list()
+        self._model_max_contacts = capacity.model_max_contacts
 
         # Proceed with allocations only if the model admits contacts, which
         # occurs when collision geometries defined in the builder and model
@@ -400,8 +339,10 @@ class CollisionDetector:
         if self._model_max_contacts > 0:
             # Create the contacts interface which will allocate all contacts data arrays
             # NOTE: If internal allocations happen, then they will contain
-            # the contacts generated by the collision detection pipelines
-            self._contacts = ContactsKamino(capacity=list(self._world_max_contacts), device=self._device)
+            # the contacts generated by the collision detection pipelines.
+            # We pass the resolved ``ContactCapacity`` verbatim so mixed
+            # zero/nonzero worlds stay literal and no defaulting is applied.
+            self._contacts = ContactsKamino(capacity=capacity, device=self._device)
 
             # Initialize the configured collision detection pipeline
             match self._pipeline_type:

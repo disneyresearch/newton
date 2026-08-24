@@ -566,6 +566,50 @@ class TestDVISolver(unittest.TestCase):
         override_solver = SolverKamino(model, override_config)
         self.assertEqual(override_solver._contacts_kamino.world_max_contacts_host, [37])
 
+    def test_00a1_dvi_multiworld_returns_heterogeneous_budgets(self):
+        """Multi-world DVI keeps per-world budgets literal instead of flattening.
+
+        Regression against the previous ``_estimate_dvi_contacts_per_world``
+        which reported a single uniform maximum for every world. The unified
+        resolver preserves geometry-driven divergence: dense worlds still get
+        bounded, sparse worlds keep their smaller geometry-driven budget, and
+        the constraint / Jacobian allocators derive their sizes from the
+        returned per-world layout.
+        """
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        for world_index in range(2):
+            builder.begin_world()
+            box_count = 16 if world_index == 0 else 1
+            for box_index in range(box_count):
+                body = builder.add_body(xform=wp.transform(wp.vec3(float(box_index), 0.0, 0.5), wp.quat_identity()))
+                builder.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
+            builder.end_world()
+        model = builder.finalize(device=self.device)
+
+        solver = SolverKamino(
+            model,
+            SolverKamino.Config(
+                dynamics_solver="dvi",
+                sparse_jacobian=False,
+                use_collision_detector=True,
+            ),
+        )
+        world_max = list(solver._contacts_kamino.world_max_contacts_host)
+        self.assertEqual(len(world_max), model.world_count)
+        self.assertGreater(world_max[0], 0)
+        self.assertGreater(world_max[1], 0)
+        # Dense world 0 gets a strictly larger budget than sparse world 1.
+        self.assertGreater(world_max[0], world_max[1])
+        self.assertEqual(
+            solver._contacts_kamino.model_max_contacts_host,
+            sum(world_max),
+        )
+        self.assertLessEqual(
+            solver._contacts_kamino.model_max_contacts_host,
+            solver._model_kamino.geoms.model_minimum_contacts,
+        )
+
     def test_00a2_dvi_contact_capacity_reports_per_world_overflow(self):
         """Report contacts dropped when one world exhausts its capacity."""
         builder = newton.ModelBuilder()

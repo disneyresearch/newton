@@ -452,14 +452,28 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertEqual(solver._contacts_kamino.model_max_contacts_host, pipeline.rigid_contact_max)
 
     def test_capacity_allocation_for_pipeline_allocated_before_kamino(self):
-        """Verify capacity allocation for a pipeline allocated before Kamino."""
+        """Verify capacity allocation for a pipeline allocated before Kamino.
+
+        The unified resolver honors ``model.rigid_contact_max`` exactly instead
+        of rounding up to a multiple of ``world_count`` (regression against the
+        legacy ``1000 -> 1002`` behavior).
+        """
         model = self._make_three_world_model()
 
         pipeline = newton.CollisionPipeline(model)
         solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=False))
 
-        # Kamino's capacity should be at least as large as the pipeline's capacity. Due to rounding up to the nearest multiple of the world count.
-        self.assertGreaterEqual(solver._contacts_kamino.model_max_contacts_host, pipeline.rigid_contact_max)
+        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, pipeline.rigid_contact_max)
+
+    def test_external_capacity_honors_explicit_rigid_contact_max_exactly(self):
+        """External CD preserves an explicit ``rigid_contact_max`` without ceil rounding."""
+        model = self._make_three_world_model()
+        model.rigid_contact_max = 1000
+
+        solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=False))
+        self.assertEqual(model.rigid_contact_max, 1000)
+        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 1000)
+        self.assertEqual(sum(solver._contacts_kamino.world_max_contacts_host), 1000)
 
     def test_internal_collision_capacity_updates_model(self):
         """Verify internal collision capacity updates the Newton model."""
@@ -609,15 +623,21 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertTrue(any("Falling back to the 'euler' integrator" in message for message in logs.output))
 
     def test_external_collisions_preserve_explicit_rigid_contact_max(self):
-        """Verify external collisions preserve an explicit contact capacity."""
+        """Verify external collisions preserve an explicit contact capacity exactly.
+
+        The unified resolver distributes the Newton total across worlds using
+        geometry-pair weights via largest-remainder rounding, so the per-world
+        sum equals the requested total exactly (previously ``1000`` was rounded
+        up to ``1002`` by ceil-dividing per world).
+        """
         model = self._make_three_world_model()
         model.rigid_contact_max = 1000
 
         solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=False))
 
         self.assertEqual(model.rigid_contact_max, 1000)
-        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [334, 334, 334])
-        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 1002)
+        self.assertEqual(sum(solver._contacts_kamino.world_max_contacts_host), 1000)
+        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 1000)
 
         contacts = newton.CollisionPipeline(model).contacts()
         with warnings.catch_warnings(), self.assertNoLogs(level="WARNING"):

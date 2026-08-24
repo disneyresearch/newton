@@ -13,10 +13,12 @@ from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.geometry import (
     CollisionDetector,
 )
-from newton._src.solvers.kamino._src.geometry.detector import (
-    _cap_world_contacts_at_total,
+from newton._src.solvers.kamino._src.geometry.contact_capacity import (
+    ContactCapacity,
+    ContactCapacityPolicy,
     _estimate_fallback_world_max_contacts,
-    _resolve_contact_capacity,
+    distribute_total_by_weights,
+    resolve_contact_capacity,
 )
 from newton._src.solvers.kamino._src.utils import logger as msg
 from newton.tests.kamino import setup_tests, test_context
@@ -222,7 +224,7 @@ class TestCollisionDetectorContactCapacity(unittest.TestCase):
 
     def test_00_cap_world_contacts_at_total(self):
         """Verify proportional capping preserves the configured model total."""
-        capped = _cap_world_contacts_at_total([100, 50, 50], 120)
+        capped = distribute_total_by_weights([100, 50, 50], 120)
         self.assertEqual(sum(capped), 120)
         self.assertEqual(capped[0], 60)
 
@@ -244,9 +246,27 @@ class TestCollisionDetectorContactCapacity(unittest.TestCase):
         model = ModelKamino.from_newton(builder.finalize(self.default_device))
         config = CollisionDetector.Config()
 
-        model_max, world_max = _resolve_contact_capacity(model, config)
-        self.assertEqual(world_max, model.geoms.world_minimum_contacts)
-        self.assertEqual(model_max, model.geoms.model_minimum_contacts)
+        capacity = resolve_contact_capacity(
+            model,
+            newton_model=None,
+            config=config,
+            policy=ContactCapacityPolicy.INTERNAL_FULL,
+        )
+        self.assertEqual(list(capacity.world_max_contacts), list(model.geoms.world_minimum_contacts))
+        self.assertEqual(capacity.model_max_contacts, model.geoms.model_minimum_contacts)
+
+    def test_03_solver_supplied_capacity_is_honored_verbatim(self):
+        """Detector uses a caller-supplied :class:`ContactCapacity` verbatim."""
+        builder = make_homogeneous_builder(num_worlds=3, build_fn=basics.build_boxes_nunchaku)
+        model = builder.finalize(self.default_device)
+        overridden = ContactCapacity(world_max_contacts=(4, 8, 15))
+        detector = CollisionDetector(
+            model=model,
+            config=CollisionDetector.Config(pipeline="primitive", broadphase="explicit"),
+            capacity=overridden,
+        )
+        self.assertEqual(list(detector.world_max_contacts), [4, 8, 15])
+        self.assertEqual(detector.model_max_contacts, 27)
 
 
 ###
