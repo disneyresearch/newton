@@ -128,8 +128,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         """Kamino geometry metadata dictates model and per-world budgets."""
         model = _make_boxes_nunchaku_kamino(self.default_device, num_worlds=3)
         capacity = resolve_contact_capacity(
-            model,
-            newton_model=None,
+            model=model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.INTERNAL_FULL,
         )
@@ -146,8 +145,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         cap = max(15, uncapped // 3)
         self.assertLess(cap, uncapped)
         capacity = resolve_contact_capacity(
-            model,
-            newton_model=None,
+            model=model,
             config=CollisionDetectorConfig(max_contacts=cap),
             policy=ContactCapacityPolicy.INTERNAL_FULL,
         )
@@ -158,8 +156,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         """``max_contacts_per_world`` produces a uniform per-world allocation."""
         model = _make_boxes_nunchaku_kamino(self.default_device, num_worlds=3)
         capacity = resolve_contact_capacity(
-            model,
-            newton_model=None,
+            model=model,
             config=CollisionDetectorConfig(max_contacts_per_world=37),
             policy=ContactCapacityPolicy.INTERNAL_FULL,
         )
@@ -170,8 +167,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         """The explicit per-world override bypasses ``max_contacts``."""
         model = _make_boxes_nunchaku_kamino(self.default_device, num_worlds=3)
         capacity = resolve_contact_capacity(
-            model,
-            newton_model=None,
+            model=model,
             config=CollisionDetectorConfig(max_contacts=1, max_contacts_per_world=25),
             policy=ContactCapacityPolicy.INTERNAL_FULL,
         )
@@ -185,8 +181,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         model = builder.finalize(self.default_device)
 
         capacity = resolve_contact_capacity(
-            model,
-            newton_model=None,
+            model=model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.INTERNAL_FULL,
         )
@@ -209,8 +204,7 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
         kamino_model = ModelKamino.from_newton(newton_model)
 
         capacity = resolve_contact_capacity(
-            kamino_model,
-            newton_model=newton_model,
+            model=kamino_model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
         )
@@ -233,7 +227,6 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
 
         capacity = resolve_contact_capacity(
             kamino_model,
-            newton_model=newton_model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
         )
@@ -245,8 +238,7 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
         kamino_model = ModelKamino.from_newton(newton_model)
 
         capacity = resolve_contact_capacity(
-            kamino_model,
-            newton_model=newton_model,
+            model=kamino_model,
             config=CollisionDetectorConfig(max_contacts_per_world=37),
             policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
         )
@@ -259,14 +251,12 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
 
         uncapped = resolve_contact_capacity(
             kamino_model,
-            newton_model=newton_model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
         )
         cap = max(1, uncapped.model_max_contacts // 2)
         capacity = resolve_contact_capacity(
-            kamino_model,
-            newton_model=newton_model,
+            model=kamino_model,
             config=CollisionDetectorConfig(max_contacts=cap),
             policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
         )
@@ -288,8 +278,7 @@ class TestResolveContactCapacityExternal(unittest.TestCase):
         kamino_model = ModelKamino.from_newton(newton_model)
 
         capacity = resolve_contact_capacity(
-            kamino_model,
-            newton_model=newton_model,
+            model=kamino_model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.EXTERNAL_NEWTON,
         )
@@ -304,8 +293,7 @@ class TestResolveContactCapacityExternal(unittest.TestCase):
         estimate = _estimate_rigid_contact_max(newton_model)
 
         capacity = resolve_contact_capacity(
-            kamino_model,
-            newton_model=newton_model,
+            model=kamino_model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.EXTERNAL_NEWTON,
         )
@@ -323,10 +311,10 @@ class TestResolveContactCapacityExternal(unittest.TestCase):
         class _Stub:
             rigid_contact_max = 30
             world_count = 2
+        kamino_model._model = _Stub()  # type: ignore[assignment]
 
         capacity = resolve_contact_capacity(
-            kamino_model,
-            newton_model=_Stub(),
+            model=kamino_model,
             config=CollisionDetectorConfig(),
             policy=ContactCapacityPolicy.EXTERNAL_NEWTON,
         )

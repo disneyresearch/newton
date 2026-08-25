@@ -771,8 +771,7 @@ class SolverKamino(SolverBase, CouplingInterface):
             policy = self._kamino.ContactCapacityPolicy.EXTERNAL_NEWTON
 
         contact_capacity = self._kamino.resolve_contact_capacity(
-            self._model_kamino,
-            newton_model=model,
+            model=self._model_kamino,
             config=collision_config,
             policy=policy,
         )

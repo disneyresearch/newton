@@ -306,7 +306,6 @@ def _apply_max_contacts_cap(world_max_contacts: list[int], max_contacts: int | N
 
 def resolve_contact_capacity(
     model: ModelKamino,
-    newton_model: Any | None,
     config: CollisionDetectorConfig,
     *,
     policy: ContactCapacityPolicy,
@@ -329,6 +328,9 @@ def resolve_contact_capacity(
     num_worlds = model.size.num_worlds
     if num_worlds <= 0:
         raise ValueError("Cannot resolve contact capacity for a model with zero worlds")
+
+    # Capture a reference to the Newton model for the bounded policy.
+    newton_model = model._model
 
     # 1. Highest-precedence internal override.
     if config.max_contacts_per_world is not None:
