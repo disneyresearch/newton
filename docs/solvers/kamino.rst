@@ -164,7 +164,7 @@ Contact-buffer capacity
 -----------------------
 
 All Kamino contact-buffer allocations funnel through a single resolver,
-:func:`~newton._src.solvers.kamino._src.geometry.capacity.resolve_contact_capacity`,
+:meth:`~newton._src.solvers.kamino._src.geometry.capacity.ContactCapacity.resolve_from`,
 which returns an immutable
 :class:`~newton._src.solvers.kamino._src.geometry.capacity.ContactCapacity`
 describing literal per-world buffers whose sum is the model total. Every

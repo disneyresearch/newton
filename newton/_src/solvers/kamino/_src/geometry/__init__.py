@@ -50,7 +50,6 @@ from .aggregation import ContactAggregation, ContactAggregationData
 from .capacity import (
     ContactCapacity,
     ContactCapacityPolicy,
-    resolve_contact_capacity,
 )
 from .contacts import ContactMode, ContactsKamino, ContactsKaminoData
 from .detector import (
@@ -79,5 +78,4 @@ __all__ = [
     "ContactMode",
     "ContactsKamino",
     "ContactsKaminoData",
-    "resolve_contact_capacity",
 ]

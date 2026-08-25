@@ -37,7 +37,6 @@ from ..core.model import ModelKamino
 from ..geometry.capacity import (
     ContactCapacity,
     ContactCapacityPolicy,
-    resolve_contact_capacity,
 )
 from ..geometry.contacts import ContactsKamino
 from ..geometry.primitive import CollisionPipelinePrimitive
@@ -202,7 +201,7 @@ class CollisionDetector:
                 If `None`, uses default config.
             capacity: Optional pre-resolved :class:`ContactCapacity`. When provided, allocation
                 uses the supplied per-world buffers verbatim (skipping the standalone
-                :func:`resolve_contact_capacity` call). This is how :class:`SolverKamino`
+                :meth:`ContactCapacity.resolve_from` call). This is how :class:`SolverKamino`
                 shares a single resolver result across the detector, ``rigid_contact_max``, and
                 the contacts container.
         """
@@ -287,7 +286,7 @@ class CollisionDetector:
                 If `None`, uses default config.
             capacity: Optional pre-resolved :class:`ContactCapacity`. When provided the detector
                 uses its per-world entries directly instead of calling
-                :func:`resolve_contact_capacity` locally.
+                :meth:`ContactCapacity.resolve_from` locally.
         """
         # Override the model if specified explicitly
         if model is not None:
@@ -320,8 +319,8 @@ class CollisionDetector:
         # pre-resolved capacity so the whole allocation chain uses one budget.
         # Standalone construction resolves with the full internal policy.
         if capacity is None:
-            capacity = resolve_contact_capacity(
-                self._model,
+            capacity = ContactCapacity.resolve_from(
+                model=self._model,
                 config=self._config,
                 policy=ContactCapacityPolicy.INTERNAL_FULL,
             )

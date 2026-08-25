@@ -63,7 +63,6 @@ if TYPE_CHECKING:
 __all__ = [
     "ContactCapacity",
     "ContactCapacityPolicy",
-    "resolve_contact_capacity",
 ]
 
 
@@ -87,7 +86,7 @@ _DYNAMIC_CONTACTS_PER_COLLIDABLE = 20
 
 
 class ContactCapacityPolicy(IntEnum):
-    """Policies driving how :func:`resolve_contact_capacity` sizes contact buffers."""
+    """Policies driving how :meth:`ContactCapacity.resolve_from` sizes contact buffers."""
 
     INTERNAL_FULL = 0
     """
@@ -121,43 +120,6 @@ class ContactCapacityPolicy(IntEnum):
     weights via largest-remainder distribution so per-world sums equal the
     model total exactly.
     """
-
-
-@dataclass(frozen=True)
-class ContactCapacity:
-    """An immutable resolved contact-buffer capacity.
-
-    :attr:`world_max_contacts` is a tuple of literal per-world capacities.
-    :attr:`model_max_contacts` is derived and always equals their sum.
-    """
-
-    world_max_contacts: tuple[int, ...]
-    """Per-world contact-buffer capacities (host, non-negative integers)."""
-
-    def __post_init__(self) -> None:
-        if not isinstance(self.world_max_contacts, tuple):
-            object.__setattr__(self, "world_max_contacts", tuple(self.world_max_contacts))
-        if len(self.world_max_contacts) == 0:
-            raise ValueError("ContactCapacity requires at least one world entry")
-        for i, value in enumerate(self.world_max_contacts):
-            if not isinstance(value, int):
-                raise TypeError(f"ContactCapacity.world_max_contacts[{i}] must be int, got {type(value).__name__}")
-            if value < 0:
-                raise ValueError(f"ContactCapacity.world_max_contacts[{i}] must be non-negative, got {value}")
-
-    @property
-    def num_worlds(self) -> int:
-        """Number of worlds described by this capacity."""
-        return len(self.world_max_contacts)
-
-    @property
-    def model_max_contacts(self) -> int:
-        """Model-wide contact-buffer capacity, i.e. the sum of per-world entries."""
-        return sum(self.world_max_contacts)
-
-    def as_list(self) -> list[int]:
-        """Return per-world capacities as a mutable ``list`` for legacy call sites."""
-        return list(self.world_max_contacts)
 
 
 ###
@@ -300,70 +262,109 @@ def _apply_max_contacts_cap(world_max_contacts: list[int], max_contacts: int | N
         return world_max_contacts
     return _distribute_total_by_weights(world_max_contacts, max_contacts)
 
+
 ###
-# Public resolver
+# Interfaces
 ###
 
-def resolve_contact_capacity(
-    model: ModelKamino,
-    config: CollisionDetectorConfig,
-    *,
-    policy: ContactCapacityPolicy,
-) -> ContactCapacity:
-    """Resolve a :class:`ContactCapacity` for the given model and policy.
 
-    Args:
-        model: The Kamino model whose geometry drives per-world sizing.
-        newton_model: The Newton model, required for
-            :attr:`ContactCapacityPolicy.INTERNAL_DVI_BOUNDED` and
-            :attr:`ContactCapacityPolicy.EXTERNAL_NEWTON`; ignored otherwise.
-        config: Collision-detector configuration providing
-            ``max_contacts_per_world`` and ``max_contacts`` precedence knobs.
-        policy: Which sizing policy to apply.
+@dataclass(frozen=True)
+class ContactCapacity:
+    """An immutable resolved contact-buffer capacity.
 
-    Returns:
-        An immutable :class:`ContactCapacity` describing per-world budgets
-        with an exact model-total sum.
+    :attr:`world_max_contacts` is a tuple of literal per-world capacities.
+    :attr:`model_max_contacts` is derived and always equals their sum.
     """
-    num_worlds = model.size.num_worlds
-    if num_worlds <= 0:
-        raise ValueError("Cannot resolve contact capacity for a model with zero worlds")
 
-    # Capture a reference to the Newton model for the bounded policy.
-    newton_model = model._model
+    world_max_contacts: tuple[int, ...]
+    """Per-world contact-buffer capacities (host, non-negative integers)."""
 
-    # 1. Highest-precedence internal override.
-    if config.max_contacts_per_world is not None:
-        per_world = int(config.max_contacts_per_world)
-        return ContactCapacity(world_max_contacts=tuple([per_world] * num_worlds))
+    def __post_init__(self) -> None:
+        if not isinstance(self.world_max_contacts, tuple):
+            object.__setattr__(self, "world_max_contacts", tuple(self.world_max_contacts))
+        if len(self.world_max_contacts) == 0:
+            raise ValueError("ContactCapacity requires at least one world entry")
+        for i, value in enumerate(self.world_max_contacts):
+            if not isinstance(value, int):
+                raise TypeError(f"ContactCapacity.world_max_contacts[{i}] must be int, got {type(value).__name__}")
+            if value < 0:
+                raise ValueError(f"ContactCapacity.world_max_contacts[{i}] must be non-negative, got {value}")
 
-    # 2. Policy-specific sizing.
-    if policy is ContactCapacityPolicy.INTERNAL_FULL:
-        world_max_contacts = _world_weights_from_geometry(model, config)
-    elif policy is ContactCapacityPolicy.INTERNAL_DVI_BOUNDED:
-        if newton_model is None:
-            raise ValueError("INTERNAL_DVI_BOUNDED policy requires a Newton model")
-        geometry_weights = list(model.geoms.world_minimum_contacts or [0] * num_worlds)
-        heuristic = _estimate_dvi_world_bound(model, newton_model)
-        # If a world has no possible contacts (zero geometry weight) the per-world
-        # budget must be zero regardless of the bounded heuristic minimum. Otherwise
-        # we return ``min(geometry, heuristic)`` so dense scenes stay bounded but
-        # heterogeneous worlds keep their literal per-world sizing.
-        world_max_contacts = [
-            min(geom, bound) if geom > 0 else 0 for geom, bound in zip(geometry_weights, heuristic, strict=True)
-        ]
-    elif policy is ContactCapacityPolicy.EXTERNAL_NEWTON:
-        if newton_model is None:
-            raise ValueError("EXTERNAL_NEWTON policy requires a Newton model")
-        newton_total = int(getattr(newton_model, "rigid_contact_max", 0) or 0)
-        if newton_total <= 0:
-            newton_total = int(_estimate_rigid_contact_max(newton_model))
-        weights = _world_weights_from_geometry(model, config)
-        world_max_contacts = _distribute_total_by_weights(weights, newton_total)
-    else:
-        raise ValueError(f"Unsupported ContactCapacityPolicy: {policy!r}")
+    @property
+    def num_worlds(self) -> int:
+        """Number of worlds described by this capacity."""
+        return len(self.world_max_contacts)
 
-    # 3. Optional model-wide cap.
-    world_max_contacts = _apply_max_contacts_cap(world_max_contacts, config.max_contacts)
+    @property
+    def model_max_contacts(self) -> int:
+        """Model-wide contact-buffer capacity, i.e. the sum of per-world entries."""
+        return sum(self.world_max_contacts)
 
-    return ContactCapacity(world_max_contacts=tuple(int(v) for v in world_max_contacts))
+    def as_list(self) -> list[int]:
+        """Return per-world capacities as a mutable ``list`` for legacy call sites."""
+        return list(self.world_max_contacts)
+
+    @staticmethod
+    def resolve_from(
+        model: ModelKamino,
+        config: CollisionDetectorConfig,
+        *,
+        policy: ContactCapacityPolicy,
+    ) -> ContactCapacity:
+        """Resolve a :class:`ContactCapacity` for the given model and policy.
+
+        Args:
+            model: The Kamino model whose geometry drives per-world sizing.
+            newton_model: The Newton model, required for
+                :attr:`ContactCapacityPolicy.INTERNAL_DVI_BOUNDED` and
+                :attr:`ContactCapacityPolicy.EXTERNAL_NEWTON`; ignored otherwise.
+            config: Collision-detector configuration providing
+                ``max_contacts_per_world`` and ``max_contacts`` precedence knobs.
+            policy: Which sizing policy to apply.
+
+        Returns:
+            An immutable :class:`ContactCapacity` describing per-world budgets
+            with an exact model-total sum.
+        """
+        num_worlds = model.size.num_worlds
+        if num_worlds <= 0:
+            raise ValueError("Cannot resolve contact capacity for a model with zero worlds")
+
+        # Capture a reference to the Newton model for the bounded policy.
+        newton_model = model._model
+
+        # 1. Highest-precedence internal override.
+        if config.max_contacts_per_world is not None:
+            per_world = int(config.max_contacts_per_world)
+            return ContactCapacity(world_max_contacts=tuple([per_world] * num_worlds))
+
+        # 2. Policy-specific sizing.
+        if policy is ContactCapacityPolicy.INTERNAL_FULL:
+            world_max_contacts = _world_weights_from_geometry(model, config)
+        elif policy is ContactCapacityPolicy.INTERNAL_DVI_BOUNDED:
+            if newton_model is None:
+                raise ValueError("INTERNAL_DVI_BOUNDED policy requires a Newton model")
+            geometry_weights = list(model.geoms.world_minimum_contacts or [0] * num_worlds)
+            heuristic = _estimate_dvi_world_bound(model, newton_model)
+            # If a world has no possible contacts (zero geometry weight) the per-world
+            # budget must be zero regardless of the bounded heuristic minimum. Otherwise
+            # we return ``min(geometry, heuristic)`` so dense scenes stay bounded but
+            # heterogeneous worlds keep their literal per-world sizing.
+            world_max_contacts = [
+                min(geom, bound) if geom > 0 else 0 for geom, bound in zip(geometry_weights, heuristic, strict=True)
+            ]
+        elif policy is ContactCapacityPolicy.EXTERNAL_NEWTON:
+            if newton_model is None:
+                raise ValueError("EXTERNAL_NEWTON policy requires a Newton model")
+            newton_total = int(getattr(newton_model, "rigid_contact_max", 0) or 0)
+            if newton_total <= 0:
+                newton_total = int(_estimate_rigid_contact_max(newton_model))
+            weights = _world_weights_from_geometry(model, config)
+            world_max_contacts = _distribute_total_by_weights(weights, newton_total)
+        else:
+            raise ValueError(f"Unsupported ContactCapacityPolicy: {policy!r}")
+
+        # 3. Optional model-wide cap.
+        world_max_contacts = _apply_max_contacts_cap(world_max_contacts, config.max_contacts)
+
+        return ContactCapacity(world_max_contacts=tuple(int(v) for v in world_max_contacts))

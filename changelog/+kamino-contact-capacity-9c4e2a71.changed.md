@@ -3,7 +3,7 @@ Unify `SolverKamino` contact-buffer sizing behind a single resolver:
   - Kamino previously used three separate estimation pipelines (geometry-pair
     metadata, Newton's `_estimate_rigid_contact_max`, and a DVI-specific
     blended pre-fill). All construction paths now go through
-    `resolve_contact_capacity`, which returns an immutable `ContactCapacity`
+    `ContactCapacity.resolve_from`, which returns an immutable `ContactCapacity`
     with literal per-world buffers whose sum equals the model total.
   - `Model.rigid_contact_max` no longer influences the Kamino model
     conversion: `ModelKamino.from_newton` always computes

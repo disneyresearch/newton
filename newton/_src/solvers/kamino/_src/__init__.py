@@ -29,7 +29,6 @@ from .core.state import StateKamino
 from .geometry.capacity import (
     ContactCapacity,
     ContactCapacityPolicy,
-    resolve_contact_capacity,
 )
 from .geometry.contacts import (
     ContactsKamino,
@@ -72,6 +71,5 @@ __all__ = [
     "msg",
     "refresh_masked_body_inertia",
     "reset_body_acceleration",
-    "resolve_contact_capacity",
     "validate_model_structural_updates",
 ]
