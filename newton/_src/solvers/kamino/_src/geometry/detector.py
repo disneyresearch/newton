@@ -34,7 +34,7 @@ from .....core.types import override
 from ...config import CollisionDetectorConfig
 from ..core.data import DataKamino
 from ..core.model import ModelKamino
-from ..geometry.contact_capacity import (
+from ..geometry.capacity import (
     ContactCapacity,
     ContactCapacityPolicy,
     resolve_contact_capacity,

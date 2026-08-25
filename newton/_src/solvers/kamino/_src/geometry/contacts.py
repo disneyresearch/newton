@@ -43,7 +43,7 @@ from ..core.types import (
     to_warp_int32_array,
 )
 from ..utils import logger as msg
-from .contact_capacity import ContactCapacity
+from .capacity import ContactCapacity
 from .keying import build_pair_key2
 
 ###

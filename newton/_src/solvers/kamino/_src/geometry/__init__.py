@@ -47,7 +47,7 @@ This module provides a front-end defined by:
 """
 
 from .aggregation import ContactAggregation, ContactAggregationData
-from .contact_capacity import (
+from .capacity import (
     ContactCapacity,
     ContactCapacityPolicy,
     resolve_contact_capacity,

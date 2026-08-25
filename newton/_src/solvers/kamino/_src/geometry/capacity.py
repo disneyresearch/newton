@@ -56,11 +56,13 @@ if TYPE_CHECKING:
     from ...config import CollisionDetectorConfig
     from ..core.model import ModelKamino
 
+###
+# Module interface
+###
 
 __all__ = [
     "ContactCapacity",
     "ContactCapacityPolicy",
-    "distribute_total_by_weights",
     "resolve_contact_capacity",
 ]
 
@@ -159,11 +161,11 @@ class ContactCapacity:
 
 
 ###
-# Distribution
+# Functions
 ###
 
 
-def distribute_total_by_weights(weights: list[int], total: int) -> list[int]:
+def _distribute_total_by_weights(weights: list[int], total: int) -> list[int]:
     """Distribute ``total`` across worlds using largest-remainder rounding.
 
     Preserves ``sum(result) == total`` exactly and gives the largest
@@ -199,11 +201,6 @@ def distribute_total_by_weights(weights: list[int], total: int) -> list[int]:
         assigned[i] += 1
         running += 1
     return assigned
-
-
-###
-# Geometry helpers
-###
 
 
 def _world_weights_from_geometry(model: ModelKamino, config: CollisionDetectorConfig) -> list[int]:
@@ -246,11 +243,6 @@ def _estimate_fallback_world_max_contacts(
                 world_max_contacts[world_id] += _DYNAMIC_CONTACTS_PER_COLLIDABLE
 
     return world_max_contacts
-
-
-###
-# DVI bounded heuristic
-###
 
 
 def _estimate_dvi_world_bound(model: ModelKamino, newton_model: Model) -> list[int]:
@@ -299,11 +291,6 @@ def _estimate_dvi_world_bound(model: ModelKamino, newton_model: Model) -> list[i
     return [max(_RIGID_CONTACT_MIN_CAPACITY, int(v)) for v in per_world]
 
 
-###
-# Public resolver
-###
-
-
 def _apply_max_contacts_cap(world_max_contacts: list[int], max_contacts: int | None) -> list[int]:
     """Scale per-world budgets down so their sum does not exceed ``max_contacts``."""
     if max_contacts is None:
@@ -311,8 +298,11 @@ def _apply_max_contacts_cap(world_max_contacts: list[int], max_contacts: int | N
     total = sum(world_max_contacts)
     if total <= max_contacts:
         return world_max_contacts
-    return distribute_total_by_weights(world_max_contacts, max_contacts)
+    return _distribute_total_by_weights(world_max_contacts, max_contacts)
 
+###
+# Public resolver
+###
 
 def resolve_contact_capacity(
     model: ModelKamino,
@@ -367,7 +357,7 @@ def resolve_contact_capacity(
         if newton_total <= 0:
             newton_total = int(_estimate_rigid_contact_max(newton_model))
         weights = _world_weights_from_geometry(model, config)
-        world_max_contacts = distribute_total_by_weights(weights, newton_total)
+        world_max_contacts = _distribute_total_by_weights(weights, newton_total)
     else:
         raise ValueError(f"Unsupported ContactCapacityPolicy: {policy!r}")
 

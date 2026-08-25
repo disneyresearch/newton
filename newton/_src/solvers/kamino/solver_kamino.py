@@ -756,7 +756,7 @@ class SolverKamino(SolverBase, CouplingInterface):
 
         # Resolve the contact buffer capacity once, using the policy dictated by
         # the coupling and dynamics solver. See
-        # :mod:`newton._src.solvers.kamino._src.geometry.contact_capacity` for
+        # :mod:`newton._src.solvers.kamino._src.geometry.capacity` for
         # the precedence rules shared by every construction path.
         from .config import CollisionDetectorConfig  # noqa: PLC0415  (avoid cycles at module import)
 
