@@ -16,15 +16,15 @@ Precedence, applied in order for every policy:
    deterministic, uniform per-world override and takes precedence over
    every other input.
 2. Policy-specific geometry / heuristic sizing:
-   * :attr:`ContactCapacityPolicy.INTERNAL_FULL` uses
+   * :attr:`ContactCapacity.Policy.INTERNAL_FULL` uses
      :attr:`~newton._src.solvers.kamino._src.core.geometry.GeometriesModel.world_minimum_contacts`
      verbatim (with a narrow geometry fallback used only when pair metadata
      is unavailable, e.g. for standalone ``ModelKamino`` instances built
      without pair enumeration).
-   * :attr:`ContactCapacityPolicy.INTERNAL_DVI_BOUNDED` returns per-world
+   * :attr:`ContactCapacity.Policy.INTERNAL_BOUNDED` returns per-world
      ``min(geometry, bounded Newton heuristic)``. This intentional
      divergence keeps DVI's dense-storage requirements bounded.
-   * :attr:`ContactCapacityPolicy.EXTERNAL_NEWTON` honors a nonzero
+   * :attr:`ContactCapacity.Policy.EXTERNAL_NEWTON` honors a nonzero
      ``model.rigid_contact_max`` exactly, otherwise it uses
      :func:`newton._src.sim.collide._estimate_rigid_contact_max` and
      distributes the total across worlds using geometry weights via
@@ -62,7 +62,6 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ContactCapacity",
-    "ContactCapacityPolicy",
 ]
 
 
@@ -70,56 +69,13 @@ __all__ = [
 # Constants
 ###
 
-
 # Conservative heuristics for the pair-based fallback path used only when
 # pair metadata is unavailable on a standalone ``ModelKamino``.
-_EXPLICIT_CONTACTS_PER_PAIR = 10
+_EXPLICIT_CONTACTS_PER_PAIR: int = 10
 """Contacts assumed per explicit shape-pair in the geometry fallback."""
 
-_DYNAMIC_CONTACTS_PER_COLLIDABLE = 20
+_DYNAMIC_CONTACTS_PER_COLLIDABLE: int = 20
 """Contacts assumed per collidable shape in the dynamic fallback."""
-
-
-###
-# Types
-###
-
-
-class ContactCapacityPolicy(IntEnum):
-    """Policies driving how :meth:`ContactCapacity.resolve_from` sizes contact buffers."""
-
-    INTERNAL_FULL = 0
-    """
-    Full internal collision detection (default, e.g. PADMM).
-
-    Per-world capacity equals the Kamino geometry-pair estimate. The model
-    total is capped by ``CollisionDetectorConfig.max_contacts`` (proportional
-    to the pre-cap per-world weights) unless
-    ``CollisionDetectorConfig.max_contacts_per_world`` is set, which takes
-    precedence.
-    """
-
-    INTERNAL_DVI_BOUNDED = 1
-    """
-    Bounded internal collision detection for DVI.
-
-    Per-world capacity is ``min(geometry, bounded Newton heuristic)``, an
-    intentional divergence from :attr:`INTERNAL_FULL` that keeps DVI's dense
-    storage requirements finite for scenes whose geometry-pair count grows
-    quadratically. ``max_contacts_per_world`` and ``max_contacts`` follow
-    the standard precedence.
-    """
-
-    EXTERNAL_NEWTON = 2
-    """
-    External Newton collision detection (``use_collision_detector=False``).
-
-    Honors ``model.rigid_contact_max`` when nonzero; otherwise defers to
-    :func:`newton._src.sim.collide._estimate_rigid_contact_max`. The
-    resulting model total is distributed across worlds using geometry-pair
-    weights via largest-remainder distribution so per-world sums equal the
-    model total exactly.
-    """
 
 
 ###
@@ -135,6 +91,46 @@ class ContactCapacity:
     :attr:`model_max_contacts` is derived and always equals their sum.
     """
 
+    ###
+    # Types
+    ###
+
+    class Policy(IntEnum):
+        """Policies driving how :meth:`ContactCapacity.resolve_from` sizes contact buffers."""
+
+        INTERNAL_FULL = 0
+        """
+        Full internal collision detection (default, e.g. PADMM).
+
+        Per-world capacity equals the Kamino geometry-pair estimate. The model
+        total is capped by ``CollisionDetectorConfig.max_contacts`` (proportional
+        to the pre-cap per-world weights) unless
+        ``CollisionDetectorConfig.max_contacts_per_world`` is set, which takes
+        precedence.
+        """
+
+        INTERNAL_BOUNDED = 1
+        """
+        Bounded internal collision detection (i.e. used by DVI).
+
+        Per-world capacity is ``min(geometry, bounded Newton heuristic)``, an
+        intentional divergence from :attr:`INTERNAL_FULL` that keeps DVI's dense
+        storage requirements finite for scenes whose geometry-pair count grows
+        quadratically. ``max_contacts_per_world`` and ``max_contacts`` follow
+        the standard precedence.
+        """
+
+        EXTERNAL_NEWTON = 2
+        """
+        External Newton collision detection (``use_collision_detector=False``).
+
+        Honors ``model.rigid_contact_max`` when nonzero; otherwise defers to
+        :func:`newton._src.sim.collide._estimate_rigid_contact_max`. The
+        resulting model total is distributed across worlds using geometry-pair
+        weights via largest-remainder distribution so per-world sums equal the
+        model total exactly.
+        """
+
     world_max_contacts: tuple[int, ...]
     """Per-world contact-buffer capacities (host, non-negative integers)."""
 
@@ -143,7 +139,7 @@ class ContactCapacity:
             object.__setattr__(self, "world_max_contacts", tuple(self.world_max_contacts))
         if len(self.world_max_contacts) == 0:
             raise ValueError("ContactCapacity requires at least one world entry")
-        for i, value in enumerate(self.world_max_contacts):
+        for i, value in enumerate[int](self.world_max_contacts):
             if not isinstance(value, int):
                 raise TypeError(f"ContactCapacity.world_max_contacts[{i}] must be int, got {type(value).__name__}")
             if value < 0:
@@ -165,18 +161,19 @@ class ContactCapacity:
 
     def as_list(self) -> list[int]:
         """Return per-world capacities as a mutable ``list`` for legacy call sites."""
-        return list(self.world_max_contacts)
+        return list[int](self.world_max_contacts)
 
     ###
     # Public API
     ###
 
-    @staticmethod
+    @classmethod
     def resolve_from(
+        cls: type[ContactCapacity],
         model: ModelKamino,
         config: CollisionDetectorConfig,
         *,
-        policy: ContactCapacityPolicy,
+        policy: Policy,
     ) -> ContactCapacity:
         """Resolve a :class:`ContactCapacity` for the given model and policy.
 
@@ -200,20 +197,20 @@ class ContactCapacity:
         # 1. Highest-precedence internal override.
         if config.max_contacts_per_world is not None:
             per_world = int(config.max_contacts_per_world)
-            return ContactCapacity(world_max_contacts=tuple(per_world for _ in range(num_worlds)))
+            return cls(world_max_contacts=tuple(per_world for _ in range(num_worlds)))
 
         # 2. Policy-specific sizing.
         match policy:
             # Internal CD, with allocation based on full geometry-pair metadata.
-            case ContactCapacityPolicy.INTERNAL_FULL:
-                world_max_contacts = ContactCapacity._compute_world_weights_from_geometry(model, config)
+            case cls.Policy.INTERNAL_FULL:
+                world_max_contacts = cls._compute_world_weights_from_geometry(model, config)
 
             # Internal CD, with allocation based on a bounded Newton heuristic.
-            case ContactCapacityPolicy.INTERNAL_DVI_BOUNDED:
+            case cls.Policy.INTERNAL_BOUNDED:
                 if newton_model is None:
-                    raise ValueError("INTERNAL_DVI_BOUNDED policy requires a Newton model")
+                    raise ValueError("INTERNAL_BOUNDED policy requires a Newton model")
                 geometry_weights = list(model.geoms.world_minimum_contacts or [0] * num_worlds)
-                heuristic = ContactCapacity._estimate_dvi_world_bound(model, newton_model)
+                heuristic = cls._estimate_bounded_world_max_contacts(model, newton_model)
 
                 # If a world has no possible contacts (zero geometry weight) the per-world
                 # budget must be zero regardless of the bounded heuristic minimum. Otherwise
@@ -224,32 +221,36 @@ class ContactCapacity:
                 ]
 
             # External CD, with allocation based on the Newton heuristic.
-            case ContactCapacityPolicy.EXTERNAL_NEWTON:
+            case cls.Policy.EXTERNAL_NEWTON:
                 if newton_model is None:
                     raise ValueError("EXTERNAL_NEWTON policy requires a Newton model")
                 newton_total = int(getattr(newton_model, "rigid_contact_max", 0) or 0)
                 if newton_total <= 0:
                     newton_total = int(_estimate_rigid_contact_max(newton_model))
-                weights = ContactCapacity._compute_world_weights_from_geometry(model, config)
-                world_max_contacts = ContactCapacity._distribute_total_by_weights(weights, newton_total)
+                weights = cls._compute_world_weights_from_geometry(model, config)
+                world_max_contacts = cls._distribute_total_by_weights(weights, newton_total)
 
             # Unsupported policies are errors.
             # NOTE: This path currently cannot be reached because the policy
             # enum is exhaustive, but we keep it here for future extensibility.
             case _:
-                raise ValueError(f"Unsupported ContactCapacityPolicy: {policy!r}")
+                raise ValueError(f"Unsupported ContactCapacity.Policy: {policy!r}")
 
         # 3. Optional model-wide cap.
-        world_max_contacts = ContactCapacity._apply_max_contacts_cap(world_max_contacts, config.max_contacts)
+        world_max_contacts = cls._apply_max_contacts_cap(world_max_contacts, config.max_contacts)
 
-        return ContactCapacity(world_max_contacts=tuple(int(v) for v in world_max_contacts))
+        # Return the resolved capacity.
+        return cls(world_max_contacts=tuple(int(v) for v in world_max_contacts))
 
     ###
     # Internals
     ###
 
     @staticmethod
-    def _estimate_fallback_world_max_contacts(model: ModelKamino, config: CollisionDetectorConfig) -> list[int]:
+    def _estimate_fallback_world_max_contacts(
+        model: ModelKamino,
+        config: CollisionDetectorConfig,
+    ) -> list[int]:
         """Estimate per-world contact capacity from geometry when pair metadata is unavailable.
 
         This narrow fallback path is only intended for standalone
@@ -279,8 +280,8 @@ class ContactCapacity:
         return world_max_contacts
 
     @staticmethod
-    def _estimate_dvi_world_bound(model: ModelKamino, newton_model: Model) -> list[int]:
-        """Per-world Newton-style bound reused by the DVI-bounded policy.
+    def _estimate_bounded_world_max_contacts(model: ModelKamino, newton_model: Model) -> list[int]:
+        """Per-world Newton-style bound reused by the bounded policy.
 
         Returns a list of length ``model.size.num_worlds``. Global (world ``-1``)
         shapes are counted into every world following the same accounting used

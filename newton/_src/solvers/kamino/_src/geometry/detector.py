@@ -34,10 +34,7 @@ from .....core.types import override
 from ...config import CollisionDetectorConfig
 from ..core.data import DataKamino
 from ..core.model import ModelKamino
-from ..geometry.capacity import (
-    ContactCapacity,
-    ContactCapacityPolicy,
-)
+from ..geometry.capacity import ContactCapacity
 from ..geometry.contacts import ContactsKamino
 from ..geometry.primitive import CollisionPipelinePrimitive
 from ..geometry.unified import CollisionPipelineUnifiedKamino
@@ -322,7 +319,7 @@ class CollisionDetector:
             capacity = ContactCapacity.resolve_from(
                 model=self._model,
                 config=self._config,
-                policy=ContactCapacityPolicy.INTERNAL_FULL,
+                policy=ContactCapacity.Policy.INTERNAL_FULL,
             )
         elif not isinstance(capacity, ContactCapacity):
             raise TypeError(f"Cannot finalize CollisionDetector: expected ContactCapacity, got {type(capacity)}")

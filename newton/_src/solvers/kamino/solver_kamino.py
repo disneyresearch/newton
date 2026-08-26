@@ -763,12 +763,12 @@ class SolverKamino(SolverBase, CouplingInterface):
         collision_config = self._config.collision_detector or CollisionDetectorConfig()
         if self._config.use_collision_detector:
             policy = (
-                self._kamino.ContactCapacityPolicy.INTERNAL_DVI_BOUNDED
+                self._kamino.ContactCapacity.Policy.INTERNAL_BOUNDED
                 if self._config.dynamics_solver == "dvi"
-                else self._kamino.ContactCapacityPolicy.INTERNAL_FULL
+                else self._kamino.ContactCapacity.Policy.INTERNAL_FULL
             )
         else:
-            policy = self._kamino.ContactCapacityPolicy.EXTERNAL_NEWTON
+            policy = self._kamino.ContactCapacity.Policy.EXTERNAL_NEWTON
 
         contact_capacity = self._kamino.ContactCapacity.resolve_from(
             model=self._model_kamino,

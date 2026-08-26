@@ -26,7 +26,7 @@ from .core.conversions import (
 from .core.joints import JOINT_QMAX, JOINT_QMIN, DofActuationPath, JointActuationType
 from .core.model import ModelKamino
 from .core.state import StateKamino
-from .geometry.capacity import ContactCapacity, ContactCapacityPolicy
+from .geometry.capacity import ContactCapacity
 from .geometry.contacts import (
     ContactsKamino,
     convert_contacts_kamino_to_newton,
@@ -45,7 +45,6 @@ __all__ = [
     "JOINT_QMIN",
     "CollisionDetector",
     "ContactCapacity",
-    "ContactCapacityPolicy",
     "ContactsKamino",
     "ControlKamino",
     "DofActuationPath",

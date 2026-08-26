@@ -14,7 +14,7 @@ import newton
 from newton._src.sim.collide import _estimate_rigid_contact_max
 from newton._src.solvers.kamino._src.core.builder import ModelBuilderKamino
 from newton._src.solvers.kamino._src.core.model import ModelKamino
-from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity, ContactCapacityPolicy
+from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity
 from newton._src.solvers.kamino._src.models.builders import basics
 from newton._src.solvers.kamino._src.models.builders.utils import make_homogeneous_builder
 from newton._src.solvers.kamino.config import CollisionDetectorConfig
@@ -125,7 +125,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.INTERNAL_FULL,
+            policy=ContactCapacity.Policy.INTERNAL_FULL,
         )
         self.assertEqual(
             list(capacity.world_max_contacts),
@@ -142,7 +142,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=model,
             config=CollisionDetectorConfig(max_contacts=cap),
-            policy=ContactCapacityPolicy.INTERNAL_FULL,
+            policy=ContactCapacity.Policy.INTERNAL_FULL,
         )
         self.assertEqual(capacity.model_max_contacts, cap)
         self.assertEqual(sum(capacity.world_max_contacts), cap)
@@ -153,7 +153,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=model,
             config=CollisionDetectorConfig(max_contacts_per_world=37),
-            policy=ContactCapacityPolicy.INTERNAL_FULL,
+            policy=ContactCapacity.Policy.INTERNAL_FULL,
         )
         self.assertEqual(list(capacity.world_max_contacts), [37, 37, 37])
         self.assertEqual(capacity.model_max_contacts, 3 * 37)
@@ -164,7 +164,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=model,
             config=CollisionDetectorConfig(max_contacts=1, max_contacts_per_world=25),
-            policy=ContactCapacityPolicy.INTERNAL_FULL,
+            policy=ContactCapacity.Policy.INTERNAL_FULL,
         )
         self.assertEqual(list(capacity.world_max_contacts), [25, 25, 25])
 
@@ -178,7 +178,7 @@ class TestResolveContactCapacityInternalFull(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.INTERNAL_FULL,
+            policy=ContactCapacity.Policy.INTERNAL_FULL,
         )
         self.assertEqual(len(capacity.world_max_contacts), 2)
         self.assertGreater(capacity.world_max_contacts[0], 0)
@@ -201,7 +201,7 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=kamino_model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
+            policy=ContactCapacity.Policy.INTERNAL_BOUNDED,
         )
         # The bounded DVI heuristic must not exceed the pair-based geometry estimate.
         self.assertLessEqual(
@@ -223,7 +223,7 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             kamino_model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
+            policy=ContactCapacity.Policy.INTERNAL_BOUNDED,
         )
         self.assertEqual(capacity.world_max_contacts, (expected,))
 
@@ -235,7 +235,7 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=kamino_model,
             config=CollisionDetectorConfig(max_contacts_per_world=37),
-            policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
+            policy=ContactCapacity.Policy.INTERNAL_BOUNDED,
         )
         self.assertEqual(list(capacity.world_max_contacts), [37])
 
@@ -247,13 +247,13 @@ class TestResolveContactCapacityInternalDviBounded(unittest.TestCase):
         uncapped = ContactCapacity.resolve_from(
             kamino_model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
+            policy=ContactCapacity.Policy.INTERNAL_BOUNDED,
         )
         cap = max(1, uncapped.model_max_contacts // 2)
         capacity = ContactCapacity.resolve_from(
             model=kamino_model,
             config=CollisionDetectorConfig(max_contacts=cap),
-            policy=ContactCapacityPolicy.INTERNAL_DVI_BOUNDED,
+            policy=ContactCapacity.Policy.INTERNAL_BOUNDED,
         )
         self.assertEqual(capacity.model_max_contacts, cap)
 
@@ -275,7 +275,7 @@ class TestResolveContactCapacityExternal(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=kamino_model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.EXTERNAL_NEWTON,
+            policy=ContactCapacity.Policy.EXTERNAL_NEWTON,
         )
         self.assertEqual(capacity.model_max_contacts, 1000)
         self.assertEqual(sum(capacity.world_max_contacts), 1000)
@@ -290,7 +290,7 @@ class TestResolveContactCapacityExternal(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=kamino_model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.EXTERNAL_NEWTON,
+            policy=ContactCapacity.Policy.EXTERNAL_NEWTON,
         )
         self.assertEqual(capacity.model_max_contacts, estimate)
 
@@ -312,7 +312,7 @@ class TestResolveContactCapacityExternal(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=kamino_model,
             config=CollisionDetectorConfig(),
-            policy=ContactCapacityPolicy.EXTERNAL_NEWTON,
+            policy=ContactCapacity.Policy.EXTERNAL_NEWTON,
         )
         # World 0 has all the geometry; world 1 has none.
         self.assertEqual(capacity.model_max_contacts, 30)

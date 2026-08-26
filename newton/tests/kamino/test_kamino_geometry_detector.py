@@ -248,7 +248,7 @@ class TestCollisionDetectorContactCapacity(unittest.TestCase):
         capacity = ContactCapacity.resolve_from(
             model=model,
             config=config,
-            policy=ContactCapacityPolicy.INTERNAL_FULL,
+            policy=ContactCapacity.Policy.INTERNAL_FULL,
         )
         self.assertEqual(list(capacity.world_max_contacts), list(model.geoms.world_minimum_contacts))
         self.assertEqual(capacity.model_max_contacts, model.geoms.model_minimum_contacts)
