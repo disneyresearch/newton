@@ -38,7 +38,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import IntEnum
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING
 
 import numpy as np
 
@@ -149,7 +149,6 @@ class ContactCapacity:
             if value < 0:
                 raise ValueError(f"ContactCapacity.world_max_contacts[{i}] must be non-negative, got {value}")
 
-
     ###
     # Properties
     ###
@@ -205,7 +204,6 @@ class ContactCapacity:
 
         # 2. Policy-specific sizing.
         match policy:
-
             # Internal CD, with allocation based on full geometry-pair metadata.
             case ContactCapacityPolicy.INTERNAL_FULL:
                 world_max_contacts = ContactCapacity._compute_world_weights_from_geometry(model, config)
@@ -301,7 +299,9 @@ class ContactCapacity:
             return [0] * num_worlds
 
         mesh = collidable & (
-            (geom_type == int(GeoType.MESH)) | (geom_type == int(GeoType.CONVEX_MESH)) | (geom_type == int(GeoType.HFIELD))
+            (geom_type == int(GeoType.MESH))
+            | (geom_type == int(GeoType.CONVEX_MESH))
+            | (geom_type == int(GeoType.HFIELD))
         )
         plane = collidable & (geom_type == int(GeoType.PLANE))
         non_plane = collidable & ~plane

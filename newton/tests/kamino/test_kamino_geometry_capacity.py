@@ -306,6 +306,7 @@ class TestResolveContactCapacityExternal(unittest.TestCase):
         class _Stub:
             rigid_contact_max = 30
             world_count = 2
+
         kamino_model._model = _Stub()  # type: ignore[assignment]
 
         capacity = ContactCapacity.resolve_from(
