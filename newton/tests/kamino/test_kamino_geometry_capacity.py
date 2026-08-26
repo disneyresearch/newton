@@ -14,11 +14,7 @@ import newton
 from newton._src.sim.collide import _estimate_rigid_contact_max
 from newton._src.solvers.kamino._src.core.builder import ModelBuilderKamino
 from newton._src.solvers.kamino._src.core.model import ModelKamino
-from newton._src.solvers.kamino._src.geometry.capacity import (
-    ContactCapacity,
-    ContactCapacityPolicy,
-    _distribute_total_by_weights,
-)
+from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity, ContactCapacityPolicy
 from newton._src.solvers.kamino._src.models.builders import basics
 from newton._src.solvers.kamino._src.models.builders.utils import make_homogeneous_builder
 from newton._src.solvers.kamino.config import CollisionDetectorConfig
@@ -87,29 +83,29 @@ class TestDistributeTotalByWeights(unittest.TestCase):
 
     def test_distribution_preserves_total(self):
         """Exact sum preservation for both scale-up and scale-down cases."""
-        self.assertEqual(sum(_distribute_total_by_weights([2, 3, 5], 100)), 100)
-        self.assertEqual(sum(_distribute_total_by_weights([1, 1, 1], 10)), 10)
-        self.assertEqual(sum(_distribute_total_by_weights([100, 50, 50], 120)), 120)
+        self.assertEqual(sum(ContactCapacity._distribute_total_by_weights([2, 3, 5], 100)), 100)
+        self.assertEqual(sum(ContactCapacity._distribute_total_by_weights([1, 1, 1], 10)), 10)
+        self.assertEqual(sum(ContactCapacity._distribute_total_by_weights([100, 50, 50], 120)), 120)
 
     def test_scale_down_matches_legacy_cap(self):
         """Legacy proportional cap behavior is preserved for down-scaling."""
-        result = _distribute_total_by_weights([100, 50, 50], 120)
+        result = ContactCapacity._distribute_total_by_weights([100, 50, 50], 120)
         self.assertEqual(sum(result), 120)
         self.assertEqual(result[0], 60)
 
     def test_zero_total_zeroes_all_worlds(self):
         """A zero model total leaves every world at zero."""
-        self.assertEqual(_distribute_total_by_weights([1, 2, 3], 0), [0, 0, 0])
+        self.assertEqual(ContactCapacity._distribute_total_by_weights([1, 2, 3], 0), [0, 0, 0])
 
     def test_all_zero_weights_produce_equal_split(self):
         """When weights are all zero, the total is distributed evenly across worlds."""
-        result = _distribute_total_by_weights([0, 0, 0], 9)
+        result = ContactCapacity._distribute_total_by_weights([0, 0, 0], 9)
         self.assertEqual(sum(result), 9)
         self.assertEqual(result, [3, 3, 3])
 
     def test_all_zero_weights_with_remainder(self):
         """Remainders from equal splits are distributed deterministically."""
-        result = _distribute_total_by_weights([0, 0, 0], 10)
+        result = ContactCapacity._distribute_total_by_weights([0, 0, 0], 10)
         self.assertEqual(sum(result), 10)
         # The remainder (1) is assigned to the first world.
         self.assertEqual(result[0], 4)

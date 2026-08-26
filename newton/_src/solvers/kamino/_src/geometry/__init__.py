@@ -47,16 +47,9 @@ This module provides a front-end defined by:
 """
 
 from .aggregation import ContactAggregation, ContactAggregationData
-from .capacity import (
-    ContactCapacity,
-    ContactCapacityPolicy,
-)
+from .capacity import ContactCapacity, ContactCapacityPolicy
 from .contacts import ContactMode, ContactsKamino, ContactsKaminoData
-from .detector import (
-    BroadPhaseType,
-    CollisionDetector,
-    CollisionPipelineType,
-)
+from .detector import BroadPhaseType, CollisionDetector, CollisionPipelineType
 from .primitive import BoundingVolumeType, CollisionPipelinePrimitive
 from .unified import CollisionPipelineUnifiedKamino
 
