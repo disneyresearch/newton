@@ -852,8 +852,8 @@ class ContactsKamino:
             model_max_contacts: int = 0
             world_max_contacts: list[int] = [0 for _ in range(model.size.num_worlds)]
             if model.geoms.model_minimum_contacts > 0:
-                model_max_contacts = model.geoms.model_minimum_contacts
-                world_max_contacts = model.geoms.world_minimum_contacts
+                model_max_contacts = int(model.geoms.model_minimum_contacts)
+                world_max_contacts = list[int](model.geoms.world_minimum_contacts)
             else:
                 num_worlds = model.size.num_worlds
                 world_max_contacts = [model_max_contacts // num_worlds] * num_worlds
