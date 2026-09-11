@@ -69,9 +69,9 @@ class TestRandomController(unittest.TestCase):
         self.assertIsNotNone(controller._data, None)
         self.assertIs(controller.device, model.device)
 
-        # Check dimensions of the decimation array
-        self.assertEqual(controller.data.decimation.shape, (model.size.num_worlds,))
-        self.assertTrue((controller.data.decimation.numpy() == 1).all())
+        # Check dimensions of the interval array
+        self.assertEqual(controller.data.interval.shape, (model.size.num_worlds,))
+        self.assertTrue((controller.data.interval.numpy() == 1.0).all())
 
         # Check that the seed is set correctly
         self.assertEqual(controller.seed, self.seed)
@@ -100,9 +100,9 @@ class TestRandomController(unittest.TestCase):
         self.assertIsNotNone(controller._data, None)
         self.assertIs(controller.device, model.device)
 
-        # Check dimensions of the decimation array
-        self.assertEqual(controller.data.decimation.shape, (model.size.num_worlds,))
-        self.assertTrue((controller.data.decimation.numpy() == 1).all())
+        # Check dimensions of the interval array
+        self.assertEqual(controller.data.interval.shape, (model.size.num_worlds,))
+        self.assertTrue((controller.data.interval.numpy() == 1.0).all())
 
         # Check that the seed is set correctly
         self.assertEqual(controller.seed, self.seed)
