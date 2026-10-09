@@ -16,7 +16,7 @@ from newton._src.solvers.kamino._src.dynamics.primal import PrimalProblem
 from newton._src.solvers.kamino._src.linalg import ConjugateResidualSolver, LLTBlockedSolver
 from newton._src.solvers.kamino._src.solvers.padmm import PADMMSolver
 from newton._src.solvers.kamino._src.solvers.padmm_primal import PADMMPrimalSolver
-from newton._src.solvers.kamino.config import PADMMPrimalSolverConfig, PADMMSolverConfig
+from newton._src.solvers.kamino.config import ConstraintComplianceConfig, PADMMPrimalSolverConfig, PADMMSolverConfig
 from newton.solvers import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.utils.make import make_containers, update_containers
@@ -34,7 +34,15 @@ def assert_close_normwise(actual: np.ndarray, desired: np.ndarray, tol: float):
 
 
 class TestSetup:
-    def __init__(self, builder_fn, device: wp.DeviceLike, sparse: bool, max_world_contacts: int = 8, **kwargs):
+    def __init__(
+        self,
+        builder_fn,
+        device: wp.DeviceLike,
+        sparse: bool,
+        max_world_contacts: int = 8,
+        config: DualProblem.Config | None = None,
+        **kwargs,
+    ):
         builder = builder_fn(**kwargs)
         for i in range(len(builder.body_qd)):
             builder.body_qd[i] = wp.spatial_vectorf(1.0, 0.0, -0.5, 0.0, 0.2, 0.0)
@@ -59,6 +67,7 @@ class TestSetup:
             "contacts": self.contacts,
             "jacobians": self.jacobians,
             "solver": solver,
+            "config": config,
             "sparse": sparse,
         }
         self.dual = DualProblem(**kwargs)
@@ -130,64 +139,90 @@ class TestPADMMPrimalSolver(unittest.TestCase):
     def tearDown(self):
         self.default_device = None
 
-    def test_01_iterates_match_dual_padmm(self):
+    def _check_iterates_match_dual_padmm(self, test: TestSetup, use_acceleration: bool):
         """
         Checks the iterate-wise equivalence of the primal PADMM on the primal problem with penalty
         `rho` and of the (dual) PADMM on the dual problem with penalty `1 / rho`.
         """
         rho = 2.0
-        num_iterations = 25
         common = {"primal_tolerance": 0.0, "dual_tolerance": 0.0, "compl_tolerance": 0.0, "eta": 1e-3}
-        common["max_iterations"] = num_iterations
+        common["max_iterations"] = 25
+        solvers = {
+            "dual": (
+                PADMMSolver(
+                    model=test.model,
+                    config=PADMMSolverConfig(rho_0=1.0 / rho, **common),
+                    use_acceleration=use_acceleration,
+                    use_graph_conditionals=False,
+                ),
+                test.dual,
+            ),
+            "primal": (
+                PADMMPrimalSolver(
+                    model=test.model,
+                    config=PADMMPrimalSolverConfig(rho_0=rho, **common),
+                    use_acceleration=use_acceleration,
+                    use_graph_conditionals=False,
+                ),
+                test.primal,
+            ),
+        }
+        results = {}
+        for name, (solver, problem) in solvers.items():
+            solver.coldstart()
+            solver.solve(problem=problem)
+            results[name] = (
+                test.world_blocks(solver.data.solution.lambdas.numpy()),
+                test.world_blocks(solver.data.solution.v_plus.numpy()),
+                solver.data.status.numpy(),
+            )
+
+        lambdas_d, v_plus_d, status_d = results["dual"]
+        lambdas_p, v_plus_p, status_p = results["primal"]
+        for w in range(test.model.size.num_worlds):
+            assert_close_normwise(lambdas_p[w], lambdas_d[w], tol=1e-3)
+            assert_close_normwise(v_plus_p[w], v_plus_d[w], tol=1e-3)
+            # NOTE: With zero tolerances, a solve only converges early once its float32
+            # residuals vanish exactly, which depends on the rounding of each formulation
+            if not (status_p[w]["converged"] or status_d[w]["converged"]):
+                self.assertEqual(status_p[w]["iterations"], status_d[w]["iterations"])
+            # The residuals are reported in the conventions of the respective algorithm
+            np.testing.assert_allclose(status_p[w]["r_p"], status_d[w]["r_d"], rtol=1e-2, atol=1e-7)
+            np.testing.assert_allclose(status_p[w]["r_d"], status_d[w]["r_p"], rtol=1e-2, atol=1e-7)
+
+    def test_01_iterates_match_dual_padmm(self):
         for builder_fn in (basics.build_box_on_plane, basics.build_box_pendulum):
             for sparse in (False, True):
                 for use_acceleration in (False, True):
                     with self.subTest(builder=builder_fn.__name__, sparse=sparse, use_acceleration=use_acceleration):
                         test = TestSetup(builder_fn, self.default_device, sparse=sparse)
-                        solvers = {
-                            "dual": (
-                                PADMMSolver(
-                                    model=test.model,
-                                    config=PADMMSolverConfig(rho_0=1.0 / rho, **common),
-                                    use_acceleration=use_acceleration,
-                                    use_graph_conditionals=False,
-                                ),
-                                test.dual,
-                            ),
-                            "primal": (
-                                PADMMPrimalSolver(
-                                    model=test.model,
-                                    config=PADMMPrimalSolverConfig(rho_0=rho, **common),
-                                    use_acceleration=use_acceleration,
-                                    use_graph_conditionals=False,
-                                ),
-                                test.primal,
-                            ),
-                        }
-                        results = {}
-                        for name, (solver, problem) in solvers.items():
-                            solver.coldstart()
-                            solver.solve(problem=problem)
-                            results[name] = (
-                                test.world_blocks(solver.data.solution.lambdas.numpy()),
-                                test.world_blocks(solver.data.solution.v_plus.numpy()),
-                                solver.data.status.numpy(),
-                            )
+                        self.assertIsNone(test.primal.data.R)
+                        self._check_iterates_match_dual_padmm(test, use_acceleration)
 
-                        lambdas_d, v_plus_d, status_d = results["dual"]
-                        lambdas_p, v_plus_p, status_p = results["primal"]
-                        for w in range(test.model.size.num_worlds):
-                            assert_close_normwise(lambdas_p[w], lambdas_d[w], tol=1e-3)
-                            assert_close_normwise(v_plus_p[w], v_plus_d[w], tol=1e-3)
-                            # NOTE: With zero tolerances, a solve only converges early once its float32
-                            # residuals vanish exactly, which depends on the rounding of each formulation
-                            if not (status_p[w]["converged"] or status_d[w]["converged"]):
-                                self.assertEqual(status_p[w]["iterations"], status_d[w]["iterations"])
-                            # The residuals are reported in the conventions of the respective algorithm
-                            np.testing.assert_allclose(status_p[w]["r_p"], status_d[w]["r_d"], rtol=1e-2, atol=1e-7)
-                            np.testing.assert_allclose(status_p[w]["r_d"], status_d[w]["r_p"], rtol=1e-2, atol=1e-7)
+    def test_02_iterates_match_dual_padmm_with_compliance(self):
+        config = DualProblem.Config(
+            compliance=ConstraintComplianceConfig(
+                joints=1e-4, limits=1e-4, contacts_normal=1e-3, contacts_tangential=1e-3
+            )
+        )
+        for sparse in (False, True):
+            for use_acceleration in (False, True):
+                with self.subTest(sparse=sparse, use_acceleration=use_acceleration):
+                    test = TestSetup(
+                        basics.build_boxes_fourbar,
+                        self.default_device,
+                        sparse=sparse,
+                        config=config,
+                        z_offset=-0.01,
+                        dynamic_joints=True,
+                        implicit_pd=True,
+                    )
+                    self.assertIsNotNone(test.primal.data.R)
+                    np.testing.assert_array_equal(test.primal.data.R.numpy(), test.dual.data.R.numpy())
+                    self.assertTrue(np.any(test.primal.data.R.numpy() > 0.0))
+                    self._check_iterates_match_dual_padmm(test, use_acceleration)
 
-    def test_02_solve_converges(self):
+    def test_03_solve_converges(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 test = TestSetup(basics.build_box_on_plane, self.default_device, sparse=sparse)
@@ -218,15 +253,28 @@ class TestSolverKaminoPrimalPADMM(unittest.TestCase):
     def tearDown(self):
         self.default_device = None
 
-    def _make_solver(self, builder: newton.ModelBuilder, dynamics_solver: str, sparse: bool):
+    def _make_solver(self, builder: newton.ModelBuilder, dynamics_solver: str, sparse: bool, **config_kwargs):
         model = builder.finalize(device=self.default_device, skip_validation_joints=True)
         config = SolverKamino.Config(
             dynamics_solver=dynamics_solver,
             use_collision_detector=True,
             sparse_jacobian=sparse,
             sparse_dynamics=sparse,
+            **config_kwargs,
         )
         return model, SolverKamino(model, config=config)
+
+    def _simulate_fourbar(self, dynamics_solver: str, sparse: bool, num_steps: int, **kwargs) -> np.ndarray:
+        builder_kwargs = {k: kwargs.pop(k) for k in ("dynamic_joints", "implicit_pd") if k in kwargs}
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        basics.build_boxes_fourbar(builder=builder, z_offset=0.05, ground=True, **builder_kwargs)
+        model, solver = self._make_solver(builder, dynamics_solver, sparse, **kwargs)
+        state_in, state_out = model.state(), model.state()
+        for _ in range(num_steps):
+            solver.step(state_in, state_out, control=None, contacts=None, dt=1e-3)
+            state_in, state_out = state_out, state_in
+        return state_in.body_q.numpy()
 
     def test_01_box_slides_and_sticks_on_plane(self):
         """Checks the analytic Coulomb friction response of a box resting on a plane on four contacts."""
@@ -250,20 +298,24 @@ class TestSolverKaminoPrimalPADMM(unittest.TestCase):
 
     def test_02_trajectories_match_padmm(self):
         """Checks that simulations with the primal and dual PADMM solvers coincide."""
-        num_steps = 20
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
-                body_q = {}
-                for dynamics_solver in ("padmm", "padmm_primal"):
-                    builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
-                    SolverKamino.register_custom_attributes(builder)
-                    basics.build_boxes_fourbar(builder=builder, z_offset=0.05, ground=True)
-                    model, solver = self._make_solver(builder, dynamics_solver, sparse)
-                    state_in, state_out = model.state(), model.state()
-                    for _ in range(num_steps):
-                        solver.step(state_in, state_out, control=None, contacts=None, dt=1e-3)
-                        state_in, state_out = state_out, state_in
-                    body_q[dynamics_solver] = state_in.body_q.numpy()
+                body_q = {s: self._simulate_fourbar(s, sparse, num_steps=20) for s in ("padmm", "padmm_primal")}
+                np.testing.assert_allclose(body_q["padmm_primal"], body_q["padmm"], atol=1e-4)
+
+    def test_03_trajectories_match_padmm_with_compliance(self):
+        """Checks that compliant simulations with implicit joint dynamics coincide for both PADMM solvers."""
+        compliance = ConstraintComplianceConfig(
+            joints=1e-4, limits=1e-4, contacts_normal=1e-3, contacts_tangential=1e-3
+        )
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                body_q = {
+                    s: self._simulate_fourbar(
+                        s, sparse, num_steps=20, dynamic_joints=True, implicit_pd=True, compliance=compliance
+                    )
+                    for s in ("padmm", "padmm_primal")
+                }
                 np.testing.assert_allclose(body_q["padmm_primal"], body_q["padmm"], atol=1e-4)
 
 
