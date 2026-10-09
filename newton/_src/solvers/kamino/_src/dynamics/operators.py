@@ -30,6 +30,7 @@ from .delassus import _compute_block_sparse_delassus_diagonal
 
 __all__ = [
     "compute_delassus_diagonal",
+    "inverse_mass_gemv",
     "jacobian_gemv",
     "jacobian_transpose_gemv",
     "mass_gemv",
@@ -52,8 +53,8 @@ wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 def _mass_gemv(
     # Inputs:
     model_bodies_wid: wp.array[wp.int32],
-    model_bodies_m_i: wp.array[wp.float32],
-    data_bodies_I_i: wp.array[wp.mat33f],
+    bodies_m_i: wp.array[wp.float32],
+    bodies_I_i: wp.array[wp.mat33f],
     world_mask: wp.array[wp.bool],
     alpha: wp.float32,
     beta: wp.float32,
@@ -68,10 +69,10 @@ def _mass_gemv(
     if not world_mask[model_bodies_wid[bid]]:
         return
 
-    # Compute the product with the body block of the mass matrix: [m * v; I @ omega]
+    # Compute the product with the body block of the (inverse) mass matrix: [m * v; I @ omega]
     k = 6 * bid
-    m_i = model_bodies_m_i[bid]
-    I_i = data_bodies_I_i[bid]
+    m_i = bodies_m_i[bid]
+    I_i = bodies_I_i[bid]
     f = m_i * wp.vec3f(x[k], x[k + 1], x[k + 2])
     tau = I_i @ wp.vec3f(x[k + 3], x[k + 4], x[k + 5])
     for d in range(3):
@@ -230,6 +231,47 @@ def mass_gemv(
             model.bodies.wid,
             model.bodies.m_i,
             data.bodies.I_i,
+            world_mask,
+            wp.float32(alpha),
+            wp.float32(beta),
+            x,
+            y,
+        ],
+        device=model.device,
+    )
+
+
+def inverse_mass_gemv(
+    model: ModelKamino,
+    data: DataKamino,
+    x: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    world_mask: wp.array[wp.bool],
+    alpha: float = 1.0,
+    beta: float = 0.0,
+):
+    """
+    Computes the generalized matrix-vector product ``y = alpha * M^{-1} @ x + beta * y`` with the
+    inverse of the block-diagonal generalized mass matrix ``M`` of the system.
+
+    Args:
+        model: The model providing the inverse body masses.
+        data: The model data providing the current (world-frame) inverse body inertias.
+        x: The input array of generalized vectors.
+        y: The input-output array of generalized vectors.
+        world_mask: The mask selecting the worlds to operate on.
+        alpha: The scaling of the matrix-vector product.
+        beta: The scaling of the input values of `y`.
+    """
+    if model.size.sum_of_num_bodies == 0:
+        return
+    wp.launch(
+        _mass_gemv,
+        dim=model.size.sum_of_num_bodies,
+        inputs=[
+            model.bodies.wid,
+            model.bodies.inv_m_i,
+            data.bodies.inv_I_i,
             world_mask,
             wp.float32(alpha),
             wp.float32(beta),

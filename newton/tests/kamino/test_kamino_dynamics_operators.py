@@ -13,6 +13,7 @@ import warp as wp
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.dynamics.operators import (
     compute_delassus_diagonal,
+    inverse_mass_gemv,
     jacobian_gemv,
     jacobian_transpose_gemv,
     mass_gemv,
@@ -71,18 +72,22 @@ class TestDynamicsOperators(unittest.TestCase):
         model, data, _limits, _contacts, _jacobians = _make_problem(self.default_device, sparse=False)
         mask = wp.ones(model.size.num_worlds, dtype=wp.bool, device=model.device)
         n_u = model.size.sum_of_num_body_dofs
+        zeros_c = np.zeros(model.size.sum_of_max_total_cts)
         x_np = self.rng.standard_normal(n_u).astype(np.float32)
         y_np = self.rng.standard_normal(n_u).astype(np.float32)
-        x = wp.array(x_np, dtype=wp.float32, device=model.device)
-        y = wp.array(y_np, dtype=wp.float32, device=model.device)
-        mass_gemv(model, data, x, y, mask, alpha=2.0, beta=0.5)
+        xs, _ = _world_blocks(model, data, x_np, zeros_c)
+        ys, _ = _world_blocks(model, data, y_np, zeros_c)
 
         M_np = make_generalized_mass_matrices(model, data)
-        xs, _ = _world_blocks(model, data, x_np, np.zeros(model.size.sum_of_max_total_cts))
-        ys, _ = _world_blocks(model, data, y_np, np.zeros(model.size.sum_of_max_total_cts))
-        ws, _ = _world_blocks(model, data, y.numpy(), np.zeros(model.size.sum_of_max_total_cts))
-        for w in range(model.size.num_worlds):
-            np.testing.assert_allclose(ws[w], 2.0 * M_np[w] @ xs[w] + 0.5 * ys[w], rtol=1e-5, atol=1e-5)
+        invM_np = make_inverse_generalized_mass_matrices(model, data)
+        for gemv_fn, A_np in ((mass_gemv, M_np), (inverse_mass_gemv, invM_np)):
+            with self.subTest(op=gemv_fn.__name__):
+                x = wp.array(x_np, dtype=wp.float32, device=model.device)
+                y = wp.array(y_np, dtype=wp.float32, device=model.device)
+                gemv_fn(model, data, x, y, mask, alpha=2.0, beta=0.5)
+                ws, _ = _world_blocks(model, data, y.numpy(), zeros_c)
+                for w in range(model.size.num_worlds):
+                    np.testing.assert_allclose(ws[w], 2.0 * A_np[w] @ xs[w] + 0.5 * ys[w], rtol=1e-5, atol=1e-5)
 
     def test_02_jacobian_products_and_delassus_diagonal(self):
         for sparse in (False, True):
