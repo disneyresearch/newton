@@ -27,6 +27,7 @@ from newton.tests.kamino.utils.extract import (
     extract_problem_vector,
 )
 from newton.tests.kamino.utils.make import (
+    make_constraint_compliance,
     make_containers,
     make_inverse_generalized_mass_matrices,
     update_containers,
@@ -226,13 +227,14 @@ class TestDelassusOperator(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = DelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             solver=LLTSequentialSolver,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Build the Delassus operator from the current data
@@ -1245,13 +1247,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1275,13 +1278,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1303,13 +1307,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1333,13 +1338,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1363,13 +1369,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1391,13 +1398,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1421,13 +1429,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1451,13 +1460,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix
@@ -1479,13 +1489,14 @@ class TestDelassusOperatorSparse(unittest.TestCase):
         # Update the containers
         update_containers(model=model, data=data, state=state, limits=limits, detector=detector, jacobians=jacobians)
 
-        # Create the Delassus operator
+        # Create the Delassus operator with the implicit joint dynamics compliance
         delassus = BlockSparseMatrixFreeDelassusOperator(
             model=model,
             data=data,
             limits=limits,
             contacts=detector.contacts,
             jacobians=jacobians,
+            compliance=make_constraint_compliance(model, data),
         )
 
         # Check that the Delassus operator represents the actual Delassus matrix

@@ -24,6 +24,7 @@ __all__ = [
     "CollisionDetectorConfig",
     "ConfigBase",
     "ConstrainedDynamicsConfig",
+    "ConstraintComplianceConfig",
     "ConstraintStabilizationConfig",
     "DVIAPGDConfig",
     "DVISolverConfig",
@@ -352,6 +353,88 @@ class ConstraintStabilizationConfig(ConfigBase):
             raise ValueError(f"Invalid gamma: {self.gamma}. Must be in range [0, 1.0].")
         if self.delta < 0.0:
             raise ValueError(f"Invalid delta: {self.delta}. Must be non-negative.")
+
+    @override
+    def __post_init__(self):
+        """Post-initialization to validate configurations."""
+        self.validate()
+
+
+@dataclass
+class ConstraintComplianceConfig(ConfigBase):
+    """
+    A container to hold configurations for global constraint compliance parameters.
+
+    Constraint compliance, also known as constraint force mixing (CFM), relaxes constraints
+    through a diagonal compliance matrix ``R`` that enters the post-event constraint-space
+    velocities as ``v+ = J u+ + v* + R lambda``, where ``lambda`` are the constraint impulses.
+    Compliance values thus have units of velocity per impulse, i.e. ``[(m/s)/(N·s)]`` for
+    translational and ``[(rad/s)/(N·m·s)]`` for rotational constraints, and a value of zero
+    corresponds to a rigid constraint.
+
+    Joint friction constraints are never compliant. The dynamic and effort-limited actuation
+    constraints of joints always use the implicit joint dynamics compliance computed from the
+    joint armature, damping and PD gains, and are thus not affected by these parameters.
+    """
+
+    joints: float = 0.0
+    """
+    Global compliance of the kinematic (i.e. bilateral) joint constraints.\n
+    Must be non-negative.\n
+    Defaults to `0.0` (i.e. rigid).
+    """
+
+    limits: float = 0.0
+    """
+    Global compliance of the unilateral joint-limit constraints.\n
+    Must be non-negative.\n
+    Defaults to `0.0` (i.e. rigid).
+    """
+
+    contacts_normal: float = 0.0
+    """
+    Global compliance along the normal direction of unilateral contact constraints.\n
+    Must be non-negative.\n
+    Defaults to `0.0` (i.e. rigid).
+    """
+
+    contacts_tangential: float = 0.0
+    """
+    Global compliance along the tangential directions of unilateral contact constraints.\n
+    Must be non-negative.\n
+    Defaults to `0.0` (i.e. rigid).
+    """
+
+    @override
+    @staticmethod
+    def from_model(model: Model, **kwargs: dict[str, Any]) -> ConstraintComplianceConfig:
+        """
+        Creates a :class:`ConstraintComplianceConfig` by attempting
+        to parse custom attributes from a :class:`Model` if available.
+
+        Note: Currently, this class does not have any custom attributes registered,
+        as only those supported by the Kamino USD scene API have been included.
+
+        Args:
+            model: The Newton model from which to parse configurations.
+        """
+        return ConstraintComplianceConfig(**kwargs)
+
+    @override
+    def validate(self) -> None:
+        """
+        Validates the current values held by the :class:`ConstraintComplianceConfig` instance.
+        """
+        if self.joints < 0.0:
+            raise ValueError(f"Invalid joints compliance: {self.joints}. Must be non-negative.")
+        if self.limits < 0.0:
+            raise ValueError(f"Invalid limits compliance: {self.limits}. Must be non-negative.")
+        if self.contacts_normal < 0.0:
+            raise ValueError(f"Invalid contacts_normal compliance: {self.contacts_normal}. Must be non-negative.")
+        if self.contacts_tangential < 0.0:
+            raise ValueError(
+                f"Invalid contacts_tangential compliance: {self.contacts_tangential}. Must be non-negative."
+            )
 
     @override
     def __post_init__(self):

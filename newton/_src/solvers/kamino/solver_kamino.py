@@ -45,6 +45,7 @@ if TYPE_CHECKING:
         CollisionDetectorConfig,
         ConfigBase,
         ConstrainedDynamicsConfig,
+        ConstraintComplianceConfig,
         ConstraintStabilizationConfig,
         DVISolverConfig,
         ForwardKinematicsSolverConfig,
@@ -241,6 +242,13 @@ class SolverKamino(SolverBase, CouplingInterface):
         If `None`, default values will be used.
         """
 
+        compliance: ConstraintComplianceConfig | None = None
+        """
+        Configurations for the constraint compliance parameters.\n
+        See :class:`ConstraintComplianceConfig` for more details.\n
+        If `None`, default values will be used, i.e. all constraints are rigid.
+        """
+
         padmm: PADMMSolverConfig | None = None
         """
         Configurations for the PADMM dynamics solver.\n
@@ -347,6 +355,7 @@ class SolverKamino(SolverBase, CouplingInterface):
             config.ForwardKinematicsSolverConfig.register_custom_attributes(builder)
             config.ConstraintStabilizationConfig.register_custom_attributes(builder)
             config.ConstrainedDynamicsConfig.register_custom_attributes(builder)
+            config.ConstraintComplianceConfig.register_custom_attributes(builder)
             config.CollisionDetectorConfig.register_custom_attributes(builder)
             config.PADMMSolverConfig.register_custom_attributes(builder)
             config.DVISolverConfig.register_custom_attributes(builder)
@@ -402,6 +411,7 @@ class SolverKamino(SolverBase, CouplingInterface):
                 "collision_detector": config.CollisionDetectorConfig,
                 "constraints": config.ConstraintStabilizationConfig,
                 "dynamics": config.ConstrainedDynamicsConfig,
+                "compliance": config.ConstraintComplianceConfig,
                 "padmm": config.PADMMSolverConfig,
                 "padmm_primal": config.PADMMPrimalSolverConfig,
                 "dvi": config.DVISolverConfig,
@@ -448,6 +458,8 @@ class SolverKamino(SolverBase, CouplingInterface):
                 raise ValueError("Constraint stabilization config cannot be None.")
             elif self.dynamics is None:
                 raise ValueError("Constrained dynamics config cannot be None.")
+            elif self.compliance is None:
+                raise ValueError("Constraint compliance config cannot be None.")
             elif self.padmm is None:
                 raise ValueError("PADMM solver config cannot be None.")
             elif self.padmm_primal is None:
@@ -463,6 +475,7 @@ class SolverKamino(SolverBase, CouplingInterface):
                 self.fk.validate()
             self.constraints.validate()
             self.dynamics.validate()
+            self.compliance.validate()
             self.padmm.validate()
             self.padmm_primal.validate()
             self.dvi.validate()
@@ -538,6 +551,8 @@ class SolverKamino(SolverBase, CouplingInterface):
                     )
                 else:
                     self.dynamics = config.ConstrainedDynamicsConfig()
+            if self.compliance is None:
+                self.compliance = config.ConstraintComplianceConfig()
             if self.padmm is None:
                 self.padmm = config.PADMMSolverConfig()
             if self.padmm_primal is None:
