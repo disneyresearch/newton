@@ -68,7 +68,12 @@ from ..kinematics.limits import LimitsKamino
 from ..linalg import LinearSolverType
 from .augmented_mass import AugmentedMassOperator, BlockSparseMatrixFreeAugmentedMassOperator
 from .config import ProblemFormulation
-from .operators import compute_delassus_diagonal, inverse_mass_gemv, jacobian_gemv, jacobian_transpose_gemv
+from .operators import (
+    compliant_delassus_gemv,
+    compute_compliant_delassus_diagonal,
+    jacobian_gemv,
+    jacobian_transpose_gemv,
+)
 from .problem import ConstrainedDynamicsProblem, ConstrainedDynamicsProblemData, SystemJacobiansType
 
 ###
@@ -153,27 +158,6 @@ def _compute_effective_stiffness(
 
 
 @wp.kernel
-def _add_compliance_to_diagonal(
-    # Inputs:
-    problem_dim: wp.array[wp.int32],
-    problem_vio: wp.array[wp.int32],
-    problem_R: wp.array[wp.float32],
-    # Outputs:
-    diag: wp.array[wp.float32],
-):
-    # Retrieve the world and constraint indices as the thread indices
-    wid, tid = wp.tid()
-
-    # Skip if the row index exceeds the problem size
-    if tid >= problem_dim[wid]:
-        return
-
-    # Add the compliance to the diagonal of the Delassus matrix
-    v_i = problem_vio[wid] + tid
-    diag[v_i] += problem_R[v_i]
-
-
-@wp.kernel
 def _compute_weighted_target_velocity(
     # Inputs:
     problem_dim: wp.array[wp.int32],
@@ -219,67 +203,6 @@ def _compute_trial_reactions(
     v_i = problem_vio[wid] + tid
     inv_p_i = 1.0 / problem_P[v_i]
     x[v_i] = inv_p_i * problem_W[v_i] * (inv_p_i * v[v_i] - J_du[v_i])
-
-
-@wp.kernel
-def _scale_by_preconditioner(
-    # Inputs:
-    problem_dim: wp.array[wp.int32],
-    problem_vio: wp.array[wp.int32],
-    problem_P: wp.array[wp.float32],
-    world_mask: wp.array[wp.bool],
-    preconditioned: wp.bool,
-    x: wp.array[wp.float32],
-    # Outputs:
-    y: wp.array[wp.float32],
-):
-    # Retrieve the world and constraint indices as the thread indices
-    wid, tid = wp.tid()
-
-    # Skip if the world is inactive or the row index exceeds the problem size
-    if not world_mask[wid] or tid >= problem_dim[wid]:
-        return
-
-    # Map from preconditioned to physical coordinates if required
-    v_i = problem_vio[wid] + tid
-    y[v_i] = wp.where(preconditioned, problem_P[v_i] * x[v_i], x[v_i])
-
-
-@wp.kernel
-def _finalize_compliant_gemv(
-    # Inputs:
-    problem_dim: wp.array[wp.int32],
-    problem_vio: wp.array[wp.int32],
-    problem_P: wp.array[wp.float32],
-    problem_R: wp.array[wp.float32],
-    world_mask: wp.array[wp.bool],
-    alpha: wp.float32,
-    beta: wp.float32,
-    preconditioned: wp.bool,
-    x_phys: wp.array[wp.float32],
-    D_x: wp.array[wp.float32],
-    # Outputs:
-    y: wp.array[wp.float32],
-):
-    # Retrieve the world and constraint indices as the thread indices
-    wid, tid = wp.tid()
-
-    # Skip if the world is inactive or the row index exceeds the problem size
-    if not world_mask[wid] or tid >= problem_dim[wid]:
-        return
-
-    # Add the compliance to the Delassus product: (D + R) x
-    v_i = problem_vio[wid] + tid
-    a_x = D_x[v_i]
-    if problem_R:
-        a_x += problem_R[v_i] * x_phys[v_i]
-
-    # Map back to preconditioned coordinates if required
-    if preconditioned:
-        a_x *= problem_P[v_i]
-
-    # Store the generalized matrix-vector product
-    y[v_i] = alpha * a_x + beta * y[v_i]
 
 
 ###
@@ -421,14 +344,9 @@ class PrimalProblem(ConstrainedDynamicsProblem):
         self._jacobians = jacobians
 
     def _compute_operator_diagonal_impl(self, diag: wp.array[wp.float32]):
-        compute_delassus_diagonal(self._model, self._system_data, self._jacobians, self._data.dim, self._data.vio, diag)
-        if self._data.R is not None:
-            wp.launch(
-                _add_compliance_to_diagonal,
-                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-                inputs=[self._data.dim, self._data.vio, self._data.R, diag],
-                device=self.device,
-            )
+        compute_compliant_delassus_diagonal(
+            self._model, self._system_data, self._jacobians, self._data.dim, self._data.vio, self._data.R, diag
+        )
 
     def _apply_preconditioner_to_operator_impl(self):
         # The preconditioner only enters the effective stiffness, computed in `update_regularization()`
@@ -494,41 +412,21 @@ class PrimalProblem(ConstrainedDynamicsProblem):
         preconditioned: bool,
         world_mask: wp.array[wp.bool],
     ):
-        cts_dim = (self._size.num_worlds, self._size.max_of_max_total_cts)
-
-        # Map the input to physical coordinates
-        wp.launch(
-            _scale_by_preconditioner,
-            dim=cts_dim,
-            inputs=[self._data.dim, self._data.vio, self._data.P, world_mask, wp.bool(preconditioned), x, self._c_phys],
-            device=self.device,
-        )
-
-        # Compute the Delassus product matrix-free: D x = J M^{-1} J^T x
-        jacobian_transpose_gemv(
-            self._model, self._jacobians, self._data.dim, self._data.vio, self._c_phys, self._u_rhs, world_mask
-        )
-        inverse_mass_gemv(self._model, self._system_data, self._u_rhs, self._u_rhs, world_mask)
-        jacobian_gemv(
-            self._model, self._jacobians, self._data.dim, self._data.vio, self._u_rhs, self._c_tmp, world_mask
-        )
-
-        # Add the compliance and map back to the coordinates of the output
-        wp.launch(
-            _finalize_compliant_gemv,
-            dim=cts_dim,
-            inputs=[
-                self._data.dim,
-                self._data.vio,
-                self._data.P,
-                self._data.R,
-                world_mask,
-                wp.float32(alpha),
-                wp.float32(beta),
-                wp.bool(preconditioned),
-                self._c_phys,
-                self._c_tmp,
-                y,
-            ],
-            device=self.device,
+        compliant_delassus_gemv(
+            self._model,
+            self._system_data,
+            self._jacobians,
+            self._data.dim,
+            self._data.vio,
+            self._data.P,
+            self._data.R,
+            x,
+            y,
+            world_mask,
+            alpha,
+            beta,
+            preconditioned,
+            self._c_phys,
+            self._c_tmp,
+            self._u_rhs,
         )

@@ -29,6 +29,8 @@ from .delassus import _compute_block_sparse_delassus_diagonal
 ###
 
 __all__ = [
+    "compliant_delassus_gemv",
+    "compute_compliant_delassus_diagonal",
     "compute_delassus_diagonal",
     "inverse_mass_gemv",
     "jacobian_gemv",
@@ -193,6 +195,88 @@ def _dense_delassus_diagonal(
 
     # Store the diagonal entry of the Delassus matrix
     diag[problem_vio[wid] + row] = d_ii
+
+
+@wp.kernel
+def _add_compliance_to_diagonal(
+    # Inputs:
+    problem_dim: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_R: wp.array[wp.float32],
+    # Outputs:
+    diag: wp.array[wp.float32],
+):
+    # Retrieve the world and constraint indices as the thread indices
+    wid, tid = wp.tid()
+
+    # Skip if the row index exceeds the problem size
+    if tid >= problem_dim[wid]:
+        return
+
+    # Add the compliance to the diagonal of the Delassus matrix
+    v_i = problem_vio[wid] + tid
+    diag[v_i] += problem_R[v_i]
+
+
+@wp.kernel
+def _scale_by_preconditioner(
+    # Inputs:
+    problem_dim: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_P: wp.array[wp.float32],
+    world_mask: wp.array[wp.bool],
+    preconditioned: wp.bool,
+    x: wp.array[wp.float32],
+    # Outputs:
+    y: wp.array[wp.float32],
+):
+    # Retrieve the world and constraint indices as the thread indices
+    wid, tid = wp.tid()
+
+    # Skip if the world is inactive or the row index exceeds the problem size
+    if not world_mask[wid] or tid >= problem_dim[wid]:
+        return
+
+    # Map from preconditioned to physical coordinates if required
+    v_i = problem_vio[wid] + tid
+    y[v_i] = wp.where(preconditioned, problem_P[v_i] * x[v_i], x[v_i])
+
+
+@wp.kernel
+def _finalize_compliant_gemv(
+    # Inputs:
+    problem_dim: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_P: wp.array[wp.float32],
+    problem_R: wp.array[wp.float32],
+    world_mask: wp.array[wp.bool],
+    alpha: wp.float32,
+    beta: wp.float32,
+    preconditioned: wp.bool,
+    x_phys: wp.array[wp.float32],
+    D_x: wp.array[wp.float32],
+    # Outputs:
+    y: wp.array[wp.float32],
+):
+    # Retrieve the world and constraint indices as the thread indices
+    wid, tid = wp.tid()
+
+    # Skip if the world is inactive or the row index exceeds the problem size
+    if not world_mask[wid] or tid >= problem_dim[wid]:
+        return
+
+    # Add the compliance to the Delassus product: (D + R) x
+    v_i = problem_vio[wid] + tid
+    a_x = D_x[v_i]
+    if problem_R:
+        a_x += problem_R[v_i] * x_phys[v_i]
+
+    # Map back to preconditioned coordinates if required
+    if preconditioned:
+        a_x *= problem_P[v_i]
+
+    # Store the generalized matrix-vector product
+    y[v_i] = alpha * a_x + beta * y[v_i]
 
 
 ###
@@ -433,3 +517,112 @@ def compute_delassus_diagonal(
             ],
             device=model.device,
         )
+
+
+def compute_compliant_delassus_diagonal(
+    model: ModelKamino,
+    data: DataKamino,
+    jacobians: DenseSystemJacobians | SparseSystemJacobians,
+    dim: wp.array[wp.int32],
+    vio: wp.array[wp.int32],
+    R: wp.array[wp.float32] | None,
+    diag: wp.array[wp.float32],
+):
+    """
+    Computes the diagonal of the compliant Delassus matrix ``D + R`` row-wise from the
+    constraint Jacobian, without assembling the matrix. Inactive rows are set to zero.
+
+    Args:
+        model: The model providing the body masses and body-space layout.
+        data: The model data providing the current inverse body inertias.
+        jacobians: The current constraint Jacobians of the system.
+        dim: The active number of constraints of each world.
+        vio: The constraint-space vector index offset of each world.
+        R: The optional diagonal constraint compliance in physical coordinates.
+        diag: The output array of constraint-space diagonal entries.
+    """
+    compute_delassus_diagonal(model, data, jacobians, dim, vio, diag)
+    if R is not None:
+        wp.launch(
+            _add_compliance_to_diagonal,
+            dim=(model.size.num_worlds, model.size.max_of_max_total_cts),
+            inputs=[dim, vio, R, diag],
+            device=model.device,
+        )
+
+
+def compliant_delassus_gemv(
+    model: ModelKamino,
+    data: DataKamino,
+    jacobians: DenseSystemJacobians | SparseSystemJacobians,
+    dim: wp.array[wp.int32],
+    vio: wp.array[wp.int32],
+    P: wp.array[wp.float32],
+    R: wp.array[wp.float32] | None,
+    x: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    world_mask: wp.array[wp.bool],
+    alpha: float,
+    beta: float,
+    preconditioned: bool,
+    c_phys: wp.array[wp.float32],
+    c_tmp: wp.array[wp.float32],
+    u_tmp: wp.array[wp.float32],
+):
+    """
+    Computes the generalized matrix-vector product ``y = alpha * A @ x + beta * y`` with the compliant
+    Delassus matrix, i.e. ``A = P (D + R) P`` if `preconditioned` or ``A = D + R`` otherwise, applying
+    ``D = J M^{-1} J^T`` matrix-free with the constraint Jacobian.
+
+    Args:
+        model: The model providing the body masses and body-space layout.
+        data: The model data providing the current inverse body inertias.
+        jacobians: The current constraint Jacobians of the system.
+        dim: The active number of constraints of each world.
+        vio: The constraint-space vector index offset of each world.
+        P: The diagonal preconditioner.
+        R: The optional diagonal constraint compliance in physical coordinates.
+        x: The input array of constraint-space vectors.
+        y: The input-output array of constraint-space vectors.
+        world_mask: The mask selecting the worlds to operate on.
+        alpha: The scaling of the matrix-vector product.
+        beta: The scaling of the input values of `y`.
+        preconditioned: Whether the operator and vectors are in preconditioned coordinates.
+        c_phys: A temporary constraint-space array holding the input in physical coordinates.
+        c_tmp: A temporary constraint-space array holding the Delassus product.
+        u_tmp: A temporary generalized array holding intermediate products.
+    """
+    cts_dim = (model.size.num_worlds, model.size.max_of_max_total_cts)
+
+    # Map the input to physical coordinates
+    wp.launch(
+        _scale_by_preconditioner,
+        dim=cts_dim,
+        inputs=[dim, vio, P, world_mask, wp.bool(preconditioned), x, c_phys],
+        device=model.device,
+    )
+
+    # Compute the Delassus product matrix-free: D x = J M^{-1} J^T x
+    jacobian_transpose_gemv(model, jacobians, dim, vio, c_phys, u_tmp, world_mask)
+    inverse_mass_gemv(model, data, u_tmp, u_tmp, world_mask)
+    jacobian_gemv(model, jacobians, dim, vio, u_tmp, c_tmp, world_mask)
+
+    # Add the compliance and map back to the coordinates of the output
+    wp.launch(
+        _finalize_compliant_gemv,
+        dim=cts_dim,
+        inputs=[
+            dim,
+            vio,
+            P,
+            R,
+            world_mask,
+            wp.float32(alpha),
+            wp.float32(beta),
+            wp.bool(preconditioned),
+            c_phys,
+            c_tmp,
+            y,
+        ],
+        device=model.device,
+    )
