@@ -57,11 +57,9 @@ wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 
 
 @wp.kernel
-def _assemble_augmented_mass_dense(
+def _assemble_augmented_mass_stiffness_dense(
     # Inputs:
     model_info_bodies_offset: wp.array[wp.int32],
-    model_bodies_m_i: wp.array[wp.float32],
-    data_bodies_I_i: wp.array[wp.mat33f],
     jacobians_J_cts_offsets: wp.array[wp.int32],
     jacobians_J_cts_data: wp.array[wp.float32],
     problem_dim: wp.array[wp.int32],
@@ -94,19 +92,91 @@ def _assemble_augmented_mass_dense(
         J_i = J_start + nbd * i
         m_ab += jacobians_J_cts_data[J_i + a] * W[vio + i] * jacobians_J_cts_data[J_i + b]
 
-    # Add the block-diagonal mass matrix contribution
+    # Add the contribution to the matrix element
+    operator_M[operator_mio[wid] + nbd * a + b] += m_ab
+
+
+@wp.kernel
+def _assemble_mass_dense(
+    # Inputs:
+    model_info_bodies_offset: wp.array[wp.int32],
+    model_bodies_m_i: wp.array[wp.float32],
+    data_bodies_I_i: wp.array[wp.mat33f],
+    operator_mio: wp.array[wp.int32],
+    # Outputs:
+    operator_M: wp.array[wp.float32],
+):
+    # Retrieve the world index and the flat matrix element index as the thread indices
+    wid, tid = wp.tid()
+
+    # Retrieve the body-space dimensions and offsets of the world
+    bio = model_info_bodies_offset[wid]
+    nbd = 6 * (model_info_bodies_offset[wid + 1] - bio)
+
+    # Compute the row and column indices of the matrix element
+    a = tid // nbd
+    b = tid % nbd
+
+    # Skip if the element exceeds the matrix size
+    if a >= nbd:
+        return
+
+    # Store the element of the block-diagonal mass matrix
+    m_ab = wp.float32(0.0)
     k = a // 6
     if k == b // 6:
         la = a % 6
         lb = b % 6
         if la < 3 and lb < 3:
             if la == lb:
-                m_ab += model_bodies_m_i[bio + k]
+                m_ab = model_bodies_m_i[bio + k]
         elif la >= 3 and lb >= 3:
-            m_ab += data_bodies_I_i[bio + k][la - 3, lb - 3]
-
-    # Store the matrix element
+            m_ab = data_bodies_I_i[bio + k][la - 3, lb - 3]
     operator_M[operator_mio[wid] + nbd * a + b] = m_ab
+
+
+@wp.kernel
+def _assemble_augmented_mass_stiffness_sparse(
+    # Inputs:
+    model_info_bodies_offset: wp.array[wp.int32],
+    jac_num_nzb: wp.array[wp.int32],
+    jac_nzb_start: wp.array[wp.int32],
+    jac_nzb_coords: wp.array2d[wp.int32],
+    jac_nzb_values: wp.array[vec6f],
+    jac_row_start: wp.array[wp.int32],
+    W: wp.array[wp.float32],
+    operator_mio: wp.array[wp.int32],
+    # Outputs:
+    operator_M: wp.array[wp.float32],
+):
+    # Retrieve the world index and the flat index of a pair of non-zero blocks as the thread indices
+    wid, tid = wp.tid()
+
+    # Skip if the pair exceeds the number of non-zero blocks of the world
+    num_nzb = jac_num_nzb[wid]
+    if tid >= num_nzb * num_nzb:
+        return
+
+    # Compute the local indices of the pair of non-zero blocks
+    k = tid // num_nzb
+    l = tid % num_nzb
+
+    # Only blocks of the same constraint row contribute: (J^T W J)_kl = J_ik^T W_i J_il
+    nzb_k = jac_nzb_start[wid] + k
+    nzb_l = jac_nzb_start[wid] + l
+    row = jac_nzb_coords[nzb_k, 0]
+    if row != jac_nzb_coords[nzb_l, 0]:
+        return
+
+    # Accumulate the outer product of the two blocks into the matrix
+    nbd = 6 * (model_info_bodies_offset[wid + 1] - model_info_bodies_offset[wid])
+    w_i = W[jac_row_start[wid] + row]
+    J_k = jac_nzb_values[nzb_k]
+    J_l = jac_nzb_values[nzb_l]
+    m_start = operator_mio[wid] + nbd * jac_nzb_coords[nzb_k, 1] + jac_nzb_coords[nzb_l, 1]
+    for d_k in range(6):
+        for d_l in range(6):
+            wp.atomic_add(operator_M, m_start + nbd * d_k + d_l, w_i * J_k[d_k] * J_l[d_l])
 
 
 @wp.kernel
@@ -245,8 +315,8 @@ class AugmentedMassOperator:
     """
     A dense representation of the constraint-augmented generalized mass matrix ``M + J^T W J``.
 
-    The matrix of each world is assembled explicitly from the dense constraint Jacobian and
-    factorized with a direct linear solver, e.g. :class:`LLTBlockedSolver`.
+    The matrix of each world is assembled explicitly from the (dense or sparse) constraint
+    Jacobian and factorized with a direct linear solver, e.g. :class:`LLTBlockedSolver`.
     """
 
     def __init__(
@@ -315,7 +385,7 @@ class AugmentedMassOperator:
         self,
         model: ModelKamino,
         data: DataKamino,
-        jacobians: DenseSystemJacobians,
+        jacobians: DenseSystemJacobians | SparseSystemJacobians,
         dim: wp.array[wp.int32],
         vio: wp.array[wp.int32],
         W: wp.array[wp.float32],
@@ -326,30 +396,63 @@ class AugmentedMassOperator:
         Args:
             model: The model providing the body masses and body-space layout.
             data: The model data providing the current body inertias.
-            jacobians: The current dense constraint Jacobians of the system.
+            jacobians: The current constraint Jacobians of the system.
             dim: The active number of constraints of each world.
             vio: The constraint-space vector index offset of each world.
             W: The per-constraint effective stiffness. Shape of ``(sum_of_max_total_cts,)``.
         """
         wp.launch(
-            _assemble_augmented_mass_dense,
+            _assemble_mass_dense,
             dim=(self._num_worlds, self._max_dim * self._max_dim),
             inputs=[
                 # Inputs:
                 model.info.bodies_offset,
                 model.bodies.m_i,
                 data.bodies.I_i,
-                jacobians.data.J_cts_offsets,
-                jacobians.data.J_cts_data,
-                dim,
-                vio,
-                W,
                 self._operator.info.mio,
                 # Outputs:
                 self._operator.mat,
             ],
             device=self._device,
         )
+        if isinstance(jacobians, SparseSystemJacobians):
+            J_cts = jacobians._J_cts.bsm
+            wp.launch(
+                _assemble_augmented_mass_stiffness_sparse,
+                dim=(self._num_worlds, J_cts.max_of_num_nzb * J_cts.max_of_num_nzb),
+                inputs=[
+                    # Inputs:
+                    model.info.bodies_offset,
+                    J_cts.num_nzb,
+                    J_cts.nzb_start,
+                    J_cts.nzb_coords,
+                    J_cts.nzb_values,
+                    J_cts.row_start,
+                    W,
+                    self._operator.info.mio,
+                    # Outputs:
+                    self._operator.mat,
+                ],
+                device=self._device,
+            )
+        else:
+            wp.launch(
+                _assemble_augmented_mass_stiffness_dense,
+                dim=(self._num_worlds, self._max_dim * self._max_dim),
+                inputs=[
+                    # Inputs:
+                    model.info.bodies_offset,
+                    jacobians.data.J_cts_offsets,
+                    jacobians.data.J_cts_data,
+                    dim,
+                    vio,
+                    W,
+                    self._operator.info.mio,
+                    # Outputs:
+                    self._operator.mat,
+                ],
+                device=self._device,
+            )
         self._solver.reset()
         self._solver.compute(A=self._operator.mat)
 

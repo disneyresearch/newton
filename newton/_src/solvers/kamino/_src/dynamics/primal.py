@@ -64,7 +64,6 @@ import warp as wp
 from ..core.data import DataKamino
 from ..core.model import ModelKamino
 from ..geometry.contacts import ContactsKamino
-from ..kinematics.jacobians import DenseSystemJacobians, SparseSystemJacobians
 from ..kinematics.limits import LimitsKamino
 from ..linalg import LinearSolverType
 from .augmented_mass import AugmentedMassOperator, BlockSparseMatrixFreeAugmentedMassOperator
@@ -404,8 +403,6 @@ class PrimalProblem(ConstrainedDynamicsProblem):
                 model=model, data=data, jacobians=jacobians, solver=solver, solver_kwargs=solver_kwargs
             )
         else:
-            if not isinstance(jacobians, DenseSystemJacobians):
-                raise TypeError("A dense primal problem requires dense jacobians.")
             self._operator = AugmentedMassOperator(model=model, solver=solver, solver_kwargs=solver_kwargs)
 
         with wp.ScopedDevice(self._device):
@@ -419,8 +416,6 @@ class PrimalProblem(ConstrainedDynamicsProblem):
         self._data.du.zero_()
 
     def _build_impl(self, model: ModelKamino, data: DataKamino, jacobians: SystemJacobiansType, reset_to_zero: bool):
-        if self._sparse != isinstance(jacobians, SparseSystemJacobians):
-            raise TypeError("The type of the jacobians does not match the sparsity of the primal problem.")
         self._model = model
         self._system_data = data
         self._jacobians = jacobians

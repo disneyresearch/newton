@@ -42,13 +42,13 @@ def assert_close_normwise(actual: np.ndarray, desired: np.ndarray, tol: float):
 
 
 class TestSetup:
-    def __init__(self, device: wp.DeviceLike, sparse: bool, preconditioning: bool):
+    def __init__(self, device: wp.DeviceLike, sparse: bool, preconditioning: bool, sparse_jacobian: bool | None = None):
         builder = make_basics_heterogeneous_builder()
         for i in range(len(builder.body_qd)):
             builder.body_qd[i] = wp.spatial_vectorf(0.5, 0.0, -0.2, 0.0, 0.3, 0.0)
         model = ModelKamino.from_newton(builder.finalize(device=device))
         self.model, self.data, self.state, self.limits, detector, self.jacobians = make_containers(
-            model=model, max_world_contacts=12, sparse=sparse
+            model=model, max_world_contacts=12, sparse=sparse if sparse_jacobian is None else sparse_jacobian
         )
         self.contacts = detector.contacts
         update_containers(
@@ -218,7 +218,28 @@ class TestPrimalProblem(unittest.TestCase):
                         np.testing.assert_allclose(y["primal"][w], y_ref, rtol=1e-4, atol=1e-4)
                         np.testing.assert_allclose(y["primal"][w], y["dual"][w], rtol=1e-4, atol=1e-4)
 
-    def test_05_compliance_enters_effective_stiffness(self):
+    def test_05_dense_problem_with_sparse_jacobians(self):
+        test = TestSetup(self.default_device, sparse=False, preconditioning=True, sparse_jacobian=True)
+        n_c = test.model.size.sum_of_max_total_cts
+        eta_np = self.rng.uniform(0.1, 1.0, n_c).astype(np.float32)
+        v_np = self.rng.standard_normal(n_c).astype(np.float32)
+        x = {}
+        for name, problem in (("dual", test.dual), ("primal", test.primal)):
+            problem.data.eta.assign(eta_np)
+            problem.update_regularization()
+            x_wp = wp.zeros(n_c, dtype=wp.float32, device=test.model.device)
+            problem.solve(v=wp.array(v_np, device=test.model.device), x=x_wp)
+            x[name] = test.world_blocks(x_wp.numpy())
+
+        _, D_np = test.delassus_matrices()
+        P_w = test.world_blocks(test.primal.data.P.numpy())
+        for w, (eta_w, v_w) in enumerate(zip(test.world_blocks(eta_np), test.world_blocks(v_np), strict=True)):
+            P = np.diag(P_w[w].astype(np.float64))
+            x_ref = np.linalg.solve(P @ D_np[w] @ P + np.diag(eta_w), v_w)
+            assert_close_normwise(x["primal"][w], x_ref, tol=1e-3)
+            assert_close_normwise(x["primal"][w], x["dual"][w], tol=1e-3)
+
+    def test_06_compliance_enters_effective_stiffness(self):
         test = TestSetup(self.default_device, sparse=False, preconditioning=True)
         problem = test.primal
         n_c = test.model.size.sum_of_max_total_cts
