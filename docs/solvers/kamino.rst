@@ -107,11 +107,33 @@ Both support dense and sparse operators and bilateral Schur elimination.
 See the :class:`~newton.solvers.SolverKamino` configuration reference for
 subsolver selection and iteration controls.
 
+Constraint compliance
+---------------------
+
+By default, joint, limit, and contact constraints are rigid. A diagonal
+constraint compliance ``R`` (also known as constraint force mixing) can soften
+them, so that the post-event constraint velocity becomes
+``v+ = J u+ + v* + R lambda`` for the constraint impulses ``lambda``.
+Compliance has units of velocity per impulse, and is configured globally per
+constraint type:
+
+.. code-block:: python
+
+   config = newton.solvers.SolverKamino.Config()
+   config.compliance.limits = 1e-4
+   config.compliance.contacts_normal = 1e-4
+   config.compliance.contacts_tangential = 1e-4
+
+Joint friction constraints are never compliant, and the rows of joints with
+armature, damping, or implicit PD actuation always use the compliance implied
+by their implicit joint dynamics. All forward-dynamics backends support
+compliance, and it incurs no cost for fully rigid systems.
+
 Inspecting terminal status
 --------------------------
 
 After each step, :attr:`~newton.solvers.SolverKamino.status` provides one
-device-resident terminal status record per world. PADMM and DVI both provide
+device-resident terminal status record per world. All backends provide
 ``converged``, ``iterations``, ``r_p``, ``r_d``, and ``r_c`` fields. Their
 residual definitions are backend-specific:
 
@@ -125,6 +147,10 @@ residual definitions are backend-specific:
   inner product over inequality blocks [J]. The ``P`` factors
   convert the first two residuals from solver scaling to physical constraint
   units.
+* **Primal PADMM:** The same residuals as PADMM, reported in the conventions of
+  the primal algorithm, i.e. with ``r_p`` and ``r_d`` swapped: ``r_p`` is the
+  constraint-velocity consistency [m/s or rad/s] and ``r_d`` the consistency of
+  the trial and admissible impulses [N·s or N·m·s].
 * **DVI:** With physical impulse ``lambda`` and augmented constraint velocity
   ``v``, ``r_p`` is the maximum infinity-norm projection distance of unilateral
   impulses from the nonnegative limit cone or Coulomb contact cone

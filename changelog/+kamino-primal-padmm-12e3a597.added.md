@@ -1,0 +1,1 @@
+Add the `"padmm_primal"` forward-dynamics backend to `SolverKamino`, a primal Proximal-ADMM that solves each iteration in the generalized velocities with the constraint-augmented mass matrix instead of the Delassus matrix, configured via `SolverKamino.Config.padmm_primal` with penalties in primal units.
