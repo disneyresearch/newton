@@ -1898,6 +1898,13 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         return self._info
 
     @property
+    def solver(self) -> LinearSolverType | None:
+        """
+        The (iterative) linear solver object for the Delassus operator, if any.
+        """
+        return self._solver
+
+    @property
     def num_matrices(self) -> int:
         """
         Returns the number of matrices represented by the Delassus operator.

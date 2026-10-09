@@ -1,33 +1,22 @@
 # SPDX-FileCopyrightText: Copyright (c) 2025 The Newton Developers
 # SPDX-License-Identifier: Apache-2.0
-#
-# Licensed under the Apache License, Version 2.0 (the "License");
-# you may not use this file except in compliance with the License.
-# You may obtain a copy of the License at
-#
-# http://www.apache.org/licenses/LICENSE-2.0
-#
-# Unless required by applicable law or agreed to in writing, software
-# distributed under the License is distributed on an "AS IS" BASIS,
-# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-# See the License for the specific language governing permissions and
-# limitations under the License.
 
 """
-Provides types for holding configurations for constrained forward dynamics problems.
+Provides configuration types shared by all formulations of the constrained forward dynamics problem.
 """
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import IntEnum
 
 import warp as wp
 
-from ..core.model import Model as ModelKamino
+from .....core.types import override
+from ...config import ConfigBase, ConstrainedDynamicsConfig, ConstraintStabilizationConfig
 from ..core.data import DataKamino
-from ..core.size import SizeKamino
+from ..core.model import ModelKamino
 from ..geometry.contacts import ContactsKamino
-from ..kinematics.constraints import get_max_constraints_per_world
 from ..kinematics.limits import LimitsKamino
 
 ###
@@ -35,8 +24,10 @@ from ..kinematics.limits import LimitsKamino
 ###
 
 __all__ = [
-    "ConstrainedDynamicsCfg",
-    "ConstrainedDynamicsConfig",
+    "ConstrainedDynamicsConfigStruct",
+    "ConstrainedDynamicsProblemConfig",
+    "ProblemFormulation",
+    "assert_containers_are_valid",
 ]
 
 
@@ -52,10 +43,32 @@ wp.set_module_options({"enable_backward": False})
 ###
 
 
-@wp.struct
-class ConstrainedDynamicsCfg:
+class ProblemFormulation(IntEnum):
     """
-    A Warp struct to hold on-device constrained dynamics configurations.
+    Enumerates the formulations of the constrained forward dynamics problem.
+
+    All formulations describe the same nonlinear complementarity problem in the post-event
+    generalized velocities ``u+`` and constraint reactions ``lambda``, but differ in the
+    space in which the inner linear system of a splitting method (e.g. PADMM) is solved.
+    """
+
+    DUAL = 0
+    """Constraint-space formulation using the (compliant) Delassus matrix ``D + R``."""
+
+    PRIMAL = 1
+    """Generalized-velocity formulation using the constraint-augmented mass matrix ``M + J^T W J``."""
+
+    KKT = 2
+    """Saddle-point formulation using the quasi-definite KKT matrix ``[M, J^T; J, -R_eff]``."""
+
+    def __str__(self):
+        return f"{self.name.lower()}"
+
+
+@wp.struct
+class ConstrainedDynamicsConfigStruct:
+    """
+    A Warp struct to hold on-device configuration parameters of a constrained dynamics problem.
     """
 
     alpha: wp.float32
@@ -67,296 +80,71 @@ class ConstrainedDynamicsCfg:
     delta: wp.float32
     """Contact penetration margin used for unilateral contact constraints"""
     preconditioning: wp.bool
-    """Flag to enable preconditioning of the dual problem."""
+    """Flag to enable diagonal preconditioning of the problem."""
 
 
 @dataclass
-class ConstrainedDynamicsConfig:
+class ConstrainedDynamicsProblemConfig(ConfigBase):
     """
-    A data container to hold host-side constrained dynamics configurations.
-    """
-
-    alpha: float = 0.01
-    """
-    Global default Baumgarte stabilization parameter for bilateral joint constraints.\n
-    Must be in range `[0, 1.0]`.\n
-    Defaults to `0.01`.
+    Per-world configurations of a constrained forward dynamics problem.
     """
 
-    beta: float = 0.01
-    """
-    Global default Baumgarte stabilization parameter for unilateral joint-limit constraints.\n
-    Must be in range `[0, 1.0]`.\n
-    Defaults to `0.01`.
-    """
+    constraints: ConstraintStabilizationConfig = field(default_factory=ConstraintStabilizationConfig)
+    """Constraint stabilization global defaults/override configurations."""
 
-    gamma: float = 0.01
-    """
-    Global default Baumgarte stabilization parameter for unilateral contact constraints.\n
-    Must be in range `[0, 1.0]`.\n
-    Defaults to `0.01`.
-    """
+    dynamics: ConstrainedDynamicsConfig = field(default_factory=ConstrainedDynamicsConfig)
+    """Constrained dynamics problem construction configurations."""
 
-    delta: float = 1.0e-6
-    """
-    Contact penetration margin used for unilateral contact constraints.\n
-    Must be non-negative.\n
-    Defaults to `1.0e-6`.
-    """
-
-    preconditioning: bool = True
-    """
-    Set to `True` to enable preconditioning of the dual problem.\n
-    Defaults to `True`.
-    """
-
-    def __post_init__(self) -> None:
+    def to_struct(self) -> ConstrainedDynamicsConfigStruct:
         """
-        Performs validation checks on the configuration values after initialization.
+        Converts the config to a :class:`ConstrainedDynamicsConfigStruct`.
         """
-        self.check_values()
+        config_struct = ConstrainedDynamicsConfigStruct()
+        config_struct.alpha = wp.float32(self.constraints.alpha)
+        config_struct.beta = wp.float32(self.constraints.beta)
+        config_struct.gamma = wp.float32(self.constraints.gamma)
+        config_struct.delta = wp.float32(self.constraints.delta)
+        config_struct.preconditioning = wp.bool(self.dynamics.preconditioning)
+        return config_struct
 
-    def check_values(self) -> None:
+    @override
+    def validate(self) -> None:
         """
-        Validates configuration values.
+        Validates the current values held by the :class:`ConstrainedDynamicsProblemConfig` instance.
         """
-        if self.alpha < 0.0 or self.alpha > 1.0:
-            raise ValueError(f"Invalid alpha: {self.alpha}. Must be in range [0, 1.0].")
-        if self.beta < 0.0 or self.beta > 1.0:
-            raise ValueError(f"Invalid beta: {self.beta}. Must be in range [0, 1.0].")
-        if self.gamma < 0.0 or self.gamma > 1.0:
-            raise ValueError(f"Invalid gamma: {self.gamma}. Must be in range [0, 1.0].")
-        if self.delta < 0.0:
-            raise ValueError(f"Invalid delta: {self.delta}. Must be non-negative.")
+        self.constraints.validate()
+        self.dynamics.validate()
 
-    def to_config(self) -> ConstrainedDynamicsCfg:
-        """
-        Converts the host-side configurations to a ConstrainedDynamicsCfg struct for on-device use.
-        """
-        config = ConstrainedDynamicsCfg()
-        config.alpha = wp.float32(self.alpha)
-        config.beta = wp.float32(self.beta)
-        config.gamma = wp.float32(self.gamma)
-        config.delta = wp.float32(self.delta)
-        config.preconditioning = wp.bool(self.preconditioning)
-        return config
-
-
-@dataclass
-class ConstrainedDynamicsInfo:
-    """
-    A container to hold the the dual forward dynamics problem data over multiple worlds.
-    """
-
-    ###
-    # Meta-Data
-    ###
-
-    model_size: SizeKamino | None = None
-    """A local reference to the model size meta-data container."""
-
-    world_max_total_cts: list[int] | None = None
-    """The maximum total number of constraints possible in each world."""
-
-    sum_of_max_problem_dims: int = 0
-    """The sum of the maximum problem dimensions (i.e. constraints) across all worlds."""
-
-    max_of_max_problem_dims: int = 0
-    """The largest maximum problem dimensions (i.e. constraints) across all worlds."""
-
-    sum_of_max_total_cts: int = 0
-    """The sum of the maximum total constraints across all worlds."""
-
-    max_of_max_total_cts: int = 0
-    """The largest maximum total constraints across all worlds."""
-
-    sum_of_max_limits: int = 0
-    """The sum of the maximum limits across all worlds."""
-
-    max_of_max_limits: int = 0
-    """The largest maximum limits across all worlds."""
-
-    sum_of_max_contacts: int = 0
-    """The sum of the maximum number of contacts across all worlds."""
-
-    max_of_max_contacts: int = 0
-    """The largest maximum number of contacts across all worlds."""
-
-    ###
-    # Configurations
-    ###
-
-    configs: wp.array | None = None
-    """
-    Problem configuration parameters for each world.\n
-    Shape of `(num_worlds,)` and type :class:`ConstrainedDynamicsCfg`.
-    """
-
-    ###
-    # Constraints Info
-    ###
-
-    njc: wp.array | None = None
-    """
-    The number of active joint constraints in each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.
-    """
-
-    nl: wp.array | None = None
-    """
-    The number of active limit constraints in each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.
-    """
-
-    nc: wp.array | None = None
-    """
-    The number of active contact constraints in each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.
-    """
-
-    lio: wp.array | None = None
-    """
-    The limit index offset of each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.\n
-    """
-
-    cio: wp.array | None = None
-    """
-    The contact index offset of each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.\n
-    """
-
-    uio: wp.array | None = None
-    """
-    The unilateral index offset of each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.\n
-    """
-
-    lcgo: wp.array | None = None
-    """
-    The limit constraint group offset of each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.\n
-    """
-
-    ccgo: wp.array | None = None
-    """
-    The contact constraint group offset of each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.\n
-    """
-
-    constraints_start: wp.array | None = None
-    """
-    The vector index offset of each constraint vector block of each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.
-    """
-
-    constraints_count: wp.array | None = None
-    """
-    The number of constraints active in each world.\n
-    Shape of `(num_worlds,)` and type :class:`int32`.
-    """
-
-    ###
-    # Properties
-    ###
-
-    @property
-    def num_worlds(self) -> int:
-        """
-        Returns the number of worlds captured by this info container.
-        """
-        if self.model_size is None:
-            raise ValueError("ModelSize reference has not been set.")
-        return self.model_size.num_worlds
-
-    ###
-    # Utilities
-    ###
+    @override
+    def __post_init__(self):
+        """Post-initialization to validate config."""
+        self.validate()
 
     @staticmethod
-    def validate_configs(
-        settings: list[ConstrainedDynamicsConfig] | ConstrainedDynamicsConfig | None, num_worlds: int
-    ) -> list[ConstrainedDynamicsConfig]:
+    def check_configs(
+        config: list[ConstrainedDynamicsProblemConfig] | ConstrainedDynamicsProblemConfig | None, num_worlds: int
+    ) -> list[ConstrainedDynamicsProblemConfig]:
         """
-        Validates constrained dynamics configurations and returns a list of configurations for each world.
+        Checks and expands the given config(s) into a list with one config per world.
 
-        If a single `ConstrainedDynamicsConfig` object is provided, it will be replicated for all worlds.
-        If a list of settings is provided, it will ensure that the number of settings matches the number of worlds.
+        If a single config is provided, it is replicated for all worlds. If a list of
+        configs is provided, the number of configs must match the number of worlds.
         """
-        if settings is None:
-            # If no settings are provided, use default settings
-            return [ConstrainedDynamicsConfig()] * num_worlds
-        elif isinstance(settings, ConstrainedDynamicsConfig):
-            # If a single settings object is provided, replicate it for all worlds
-            return [settings] * num_worlds
-        elif isinstance(settings, list):
-            # Ensure the settings are of the correct type and length
-            if len(settings) != num_worlds:
-                raise ValueError(f"Expected {num_worlds} settings, got {len(settings)}")
-            for s in settings:
-                if not isinstance(s, ConstrainedDynamicsConfig):
-                    raise TypeError(f"Expected ConstrainedDynamicsConfig, got {type(s)}")
-            return settings
+        if config is None:
+            return [ConstrainedDynamicsProblemConfig()] * num_worlds
+        elif isinstance(config, ConstrainedDynamicsProblemConfig):
+            return [config] * num_worlds
+        elif isinstance(config, list):
+            if len(config) != num_worlds:
+                raise ValueError(f"Expected {num_worlds} configs, got {len(config)}")
+            for c in config:
+                if not isinstance(c, ConstrainedDynamicsProblemConfig):
+                    raise TypeError(f"Expected ConstrainedDynamicsProblemConfig, got {type(c)}")
+            return config
         else:
             raise TypeError(
-                f"Expected List[ConstrainedDynamicsConfig] or ConstrainedDynamicsConfig, got {type(settings)}"
-            )
-
-    @classmethod
-    def from_containers(
-        cls,
-        sum_of_max_problem_dims: int,
-        max_of_max_problem_dims: int,
-        model: ModelKamino,
-        data: DataKamino,
-        limits: LimitsKamino | None = None,
-        contacts: ContactsKamino | None = None,
-        configs: list[ConstrainedDynamicsConfig] | ConstrainedDynamicsConfig | None = None,
-        device: wp.DeviceLike = None,
-    ) -> ConstrainedDynamicsInfo:
-        # Ensure the simulation containers are valid
-        assert_containers_are_valid(model=model, data=data, limits=limits, contacts=contacts)
-
-        # If a device is not provided use the model's device
-        if device is None:
-            _device = model.device
-        else:
-            _device = device
-
-        # Validate configurations
-        configs = cls.validate_configs(configs, model.info.num_worlds)
-
-        # Extract required maximum number of constraints possible in each world
-        world_max_total_cts = get_max_constraints_per_world(model, limits, contacts)
-
-        # Allocate and return the constrained dynamics info
-        # container constructed from the given model and data
-        with wp.ScopedDevice(_device):
-            return ConstrainedDynamicsInfo(
-                # Store meta-data about the problem dimensions
-                model_size=model.size,
-                world_max_total_cts=world_max_total_cts,
-                sum_of_max_problem_dims=int(sum_of_max_problem_dims),
-                max_of_max_problem_dims=int(max_of_max_problem_dims),
-                sum_of_max_total_cts=int(sum(world_max_total_cts)),
-                max_of_max_total_cts=int(max(world_max_total_cts)),
-                sum_of_max_limits=int(limits.model_max_limits_host) if limits is not None else 0,
-                max_of_max_limits=int(max(limits.world_max_limits_host)) if limits is not None else 0,
-                sum_of_max_contacts=int(contacts.model_max_contacts_host) if contacts is not None else 0,
-                max_of_max_contacts=int(max(contacts.world_max_contacts_host)) if contacts is not None else 0,
-                # Store the constrained dynamics problem configurations
-                configs=wp.array([c.to_config() for c in configs], dtype=ConstrainedDynamicsCfg),
-                # Capture references to the mode and data info arrays
-                njc=model.info.num_joint_cts,
-                nl=data.info.num_limits,
-                nc=data.info.num_contacts,
-                lio=model.info.limits_offset,
-                cio=model.info.contacts_offset,
-                uio=model.info.unilaterals_offset,
-                lcgo=data.info.limit_cts_group_offset,
-                ccgo=data.info.contact_cts_group_offset,
-                constraints_start=model.info.total_cts_offset,
-                constraints_count=data.info.num_total_cts,
+                "Expected List[ConstrainedDynamicsProblemConfig] or ConstrainedDynamicsProblemConfig, "
+                f"got {type(config)}"
             )
 
 
@@ -366,7 +154,7 @@ class ConstrainedDynamicsInfo:
 
 
 def assert_containers_are_valid(
-    model: ModelKamino,
+    model: ModelKamino | None,
     data: DataKamino | None = None,
     limits: LimitsKamino | None = None,
     contacts: ContactsKamino | None = None,
@@ -385,18 +173,15 @@ def assert_containers_are_valid(
 
     if data_required and data is None:
         raise ValueError("A data container of type `DataKamino` must be provided.")
-    elif data is not None:
-        if not isinstance(data, DataKamino):
-            raise ValueError("Invalid data container provided. Must be an instance of `DataKamino`.")
+    elif data is not None and not isinstance(data, DataKamino):
+        raise ValueError("Invalid data container provided. Must be an instance of `DataKamino`.")
 
     if limits_required and limits is None:
         raise ValueError("A limits container of type `LimitsKamino` must be provided.")
-    elif limits is not None:
-        if not isinstance(limits, LimitsKamino):
-            raise ValueError("Invalid limits container provided. Must be an instance of `LimitsKamino`.")
+    elif limits is not None and not isinstance(limits, LimitsKamino):
+        raise ValueError("Invalid limits container provided. Must be an instance of `LimitsKamino`.")
 
     if contacts_required and contacts is None:
         raise ValueError("A contacts container of type `ContactsKamino` must be provided.")
-    elif contacts is not None:
-        if not isinstance(contacts, ContactsKamino):
-            raise ValueError("Invalid contacts container provided. Must be an instance of `ContactsKamino`.")
+    elif contacts is not None and not isinstance(contacts, ContactsKamino):
+        raise ValueError("Invalid contacts container provided. Must be an instance of `ContactsKamino`.")
