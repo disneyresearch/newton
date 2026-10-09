@@ -40,11 +40,20 @@ world.
 Choosing a dynamics solver
 --------------------------
 
-Kamino provides two forward-dynamics backends:
+Kamino provides three forward-dynamics backends:
 
 * ``"padmm"`` (default): proximal ADMM, dense Jacobians/dynamics, and the Euler
   integrator. It is the slower, more robust option because it solves equality
   and inequality constraints together.
+* ``"padmm_primal"`` (opt-in): the primal variant of proximal ADMM, which solves
+  each iteration's linear system in the generalized velocities, using the
+  constraint-augmented mass matrix ``M + J^T W J`` instead of the Delassus
+  matrix. Its iterations are equivalent to those of ``"padmm"`` with the
+  inverse penalty, so it is equally robust, while its linear system keeps the
+  fixed size of the generalized velocities regardless of the number of active
+  constraints. It is therefore preferable for contact-rich and hyperstatic
+  systems. Its penalty parameters in ``config.padmm_primal`` are expressed in
+  primal units, i.e. as the inverses of those of ``"padmm"``.
 * ``"dvi"`` (opt-in): projected dual iterations, sparse Jacobians, dense dynamics
   with the RCM-reordered blocked LLT solver, and the Euler integrator. It is
   generally faster, but approximates the coupled problem by alternating between

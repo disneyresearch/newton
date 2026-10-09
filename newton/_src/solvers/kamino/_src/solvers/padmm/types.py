@@ -212,6 +212,12 @@ class PADMMConfigStruct:
     Must be greater than zero. Defaults to `1e-5`.
     """
 
+    rho_max: wp.float32
+    """
+    The upper-bound applied to the ALM penalty parameter.
+    Must be greater than `rho_min`. Defaults to `inf`.
+    """
+
     a_0: wp.float32
     """
     The initial value of the acceleration parameter.
@@ -1274,6 +1280,7 @@ def convert_config_to_struct(config: PADMMSolverConfig) -> PADMMConfigStruct:
     config_struct.eta = config.eta
     config_struct.rho_0 = config.rho_0
     config_struct.rho_min = config.rho_min
+    config_struct.rho_max = config.rho_max
     config_struct.a_0 = config.a_0
     config_struct.alpha = config.alpha
     config_struct.tau = config.tau

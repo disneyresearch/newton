@@ -49,6 +49,7 @@ if TYPE_CHECKING:
         DVISolverConfig,
         ForwardKinematicsSolverConfig,
         MaterialManagerConfig,
+        PADMMPrimalSolverConfig,
         PADMMSolverConfig,
     )
 
@@ -247,6 +248,13 @@ class SolverKamino(SolverBase, CouplingInterface):
         If `None`, default values will be used.
         """
 
+        padmm_primal: PADMMPrimalSolverConfig | None = None
+        """
+        Configurations for the primal PADMM dynamics solver.\n
+        See :class:`PADMMPrimalSolverConfig` for more details.\n
+        If `None`, default values will be used.
+        """
+
         dvi: DVISolverConfig | None = None
         """
         Configurations for the DVI dynamics solver.\n
@@ -284,11 +292,16 @@ class SolverKamino(SolverBase, CouplingInterface):
         Defaults to `"euler"`.
         """
 
-        dynamics_solver: Literal["padmm", "dvi"] = "padmm"
+        dynamics_solver: Literal["padmm", "padmm_primal", "dvi"] = "padmm"
         """
         The forward dynamics solver to use. Construct the config with this value
-        so solver-dependent defaults are initialized consistently. Defaults to
-        `"padmm"`.
+        so solver-dependent defaults are initialized consistently.\n
+
+        - `"padmm"`: The Proximal-ADMM solver operating on the dual problem in constraint space.
+        - `"padmm_primal"`: The Proximal-ADMM solver operating on the primal problem in generalized velocities.
+        - `"dvi"`: The DVI solver operating on the dual problem in constraint space.
+
+        Defaults to `"padmm"`.
         """
 
         angular_velocity_damping: float = 0.0
@@ -390,6 +403,7 @@ class SolverKamino(SolverBase, CouplingInterface):
                 "constraints": config.ConstraintStabilizationConfig,
                 "dynamics": config.ConstrainedDynamicsConfig,
                 "padmm": config.PADMMSolverConfig,
+                "padmm_primal": config.PADMMPrimalSolverConfig,
                 "dvi": config.DVISolverConfig,
                 "fk": config.ForwardKinematicsSolverConfig,
                 "materials": config.MaterialManagerConfig,
@@ -436,6 +450,8 @@ class SolverKamino(SolverBase, CouplingInterface):
                 raise ValueError("Constrained dynamics config cannot be None.")
             elif self.padmm is None:
                 raise ValueError("PADMM solver config cannot be None.")
+            elif self.padmm_primal is None:
+                raise ValueError("Primal PADMM solver config cannot be None.")
             elif self.dvi is None:
                 raise ValueError("DVI solver config cannot be None.")
 
@@ -448,10 +464,11 @@ class SolverKamino(SolverBase, CouplingInterface):
             self.constraints.validate()
             self.dynamics.validate()
             self.padmm.validate()
+            self.padmm_primal.validate()
             self.dvi.validate()
             self.materials.validate()
 
-            supported_dynamics_solvers = {"padmm", "dvi"}
+            supported_dynamics_solvers = {"padmm", "padmm_primal", "dvi"}
             if self.dynamics_solver not in supported_dynamics_solvers:
                 raise ValueError(
                     f"Invalid dynamics solver: {self.dynamics_solver}. Must be one of {supported_dynamics_solvers}."
@@ -461,12 +478,18 @@ class SolverKamino(SolverBase, CouplingInterface):
                     "The DVI solver currently requires `dynamics.preconditioning=False` so convergence checks and "
                     "contact cone updates stay in physical constraint units."
                 )
+            padmm_config = self.padmm_primal if self.dynamics_solver == "padmm_primal" else self.padmm
             if (
-                self.dynamics_solver == "padmm"
+                self.dynamics_solver in {"padmm", "padmm_primal"}
                 and not self.sparse_dynamics
-                and self.padmm.penalty_update_method != "fixed"
+                and padmm_config.penalty_update_method != "fixed"
             ):
                 raise ValueError("Adaptive PADMM penalty updates require `sparse_dynamics=True`.")
+            if self.dynamics_solver == "padmm_primal" and self.dynamics.linear_solver_type == "CRF":
+                raise ValueError(
+                    "The primal PADMM solver does not support the 'CRF' linear solver, "
+                    "which is specialized to the Delassus operator of the dual problem."
+                )
 
             # Conversion to JointCorrectionMode will raise an error if the input string is invalid.
             JointCorrectionMode.from_string(self.rotation_correction)
@@ -517,6 +540,8 @@ class SolverKamino(SolverBase, CouplingInterface):
                     self.dynamics = config.ConstrainedDynamicsConfig()
             if self.padmm is None:
                 self.padmm = config.PADMMSolverConfig()
+            if self.padmm_primal is None:
+                self.padmm_primal = config.PADMMPrimalSolverConfig()
             if self.dvi is None:
                 # Storage backends share one convergence schedule; sparse
                 # optimizations must not silently weaken DVI semantics.

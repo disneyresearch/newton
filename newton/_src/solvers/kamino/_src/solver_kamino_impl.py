@@ -28,6 +28,7 @@ from .core.model import ModelKamino
 from .core.state import StateKamino
 from .core.time import advance_time
 from .dynamics.dual import DualProblem
+from .dynamics.primal import PrimalProblem
 from .dynamics.problem import ConstrainedDynamicsProblem
 from .dynamics.wrenches import (
     compute_constraint_body_wrenches,
@@ -63,6 +64,7 @@ from .solvers.dvi import DVISolver
 from .solvers.fk import ForwardKinematicsSolver
 from .solvers.metrics import SolutionMetrics
 from .solvers.padmm import PADMMSolver
+from .solvers.padmm_primal import PADMMPrimalSolver
 from .solvers.warmstart import WarmstarterContacts, WarmstarterLimits
 from .utils import logger as msg
 
@@ -153,9 +155,10 @@ class SolverKaminoImpl(SolverBase):
 
         # Cache the solver config and parse relevant options for internal use
         self._config: SolverKaminoImpl.Config = config
-        if config.dynamics_solver == "padmm":
-            warmstart_mode = config.padmm.warmstart_mode
-            contact_warmstart_method = config.padmm.contact_warmstart_method
+        padmm_config = config.padmm_primal if config.dynamics_solver == "padmm_primal" else config.padmm
+        if config.dynamics_solver in {"padmm", "padmm_primal"}:
+            warmstart_mode = padmm_config.warmstart_mode
+            contact_warmstart_method = padmm_config.contact_warmstart_method
         elif config.dynamics_solver == "dvi":
             warmstart_mode = config.dvi.warmstart_mode
             contact_warmstart_method = config.dvi.contact_warmstart_method
@@ -202,12 +205,12 @@ class SolverKaminoImpl(SolverBase):
         # If graph conditionals are disabled in the PADMM solver, ensure that they
         # are also disabled in the linear solver if it is an iterative solver.
         linear_solver_kwargs = dict(self._config.dynamics.linear_solver_kwargs)
-        if not self._config.padmm.use_graph_conditionals and issubclass(linear_solver_type, IterativeSolver):
+        if not padmm_config.use_graph_conditionals and issubclass(linear_solver_type, IterativeSolver):
             linear_solver_kwargs.setdefault("use_graph_conditionals", False)
 
         # Bundle both constraint stabilization and forward-
         # dynamics problem configurations into a single object
-        problem_fd_config = DualProblem.Config(
+        problem_fd_config = ConstrainedDynamicsProblem.Config(
             constraints=self._config.constraints,
             dynamics=self._config.dynamics,
             # TODO: linear_solver_type=linear_solver_type,
@@ -240,8 +243,10 @@ class SolverKaminoImpl(SolverBase):
                 contacts=contacts,
             )
 
-        # Allocate the dual problem data on the device
-        self._problem_fd = DualProblem(
+        # Allocate the forward dynamics problem data on the device, using the
+        # formulation whose linear operator is required by the selected solver
+        problem_fd_type = PrimalProblem if self._config.dynamics_solver == "padmm_primal" else DualProblem
+        self._problem_fd: ConstrainedDynamicsProblem = problem_fd_type(
             model=self._model,
             data=self._data,
             limits=self._limits,
@@ -254,13 +259,14 @@ class SolverKaminoImpl(SolverBase):
         )
 
         # Allocate the forward dynamics solver on the device
-        if self._config.dynamics_solver == "padmm":
-            self._solver_fd = PADMMSolver(
+        if self._config.dynamics_solver in {"padmm", "padmm_primal"}:
+            padmm_solver_type = PADMMPrimalSolver if self._config.dynamics_solver == "padmm_primal" else PADMMSolver
+            self._solver_fd = padmm_solver_type(
                 model=self._model,
-                config=self._config.padmm,
+                config=padmm_config,
                 warmstart=self._warmstart_mode,
-                use_acceleration=self._config.padmm.use_acceleration,
-                use_graph_conditionals=self._config.padmm.use_graph_conditionals,
+                use_acceleration=padmm_config.use_acceleration,
+                use_graph_conditionals=padmm_config.use_graph_conditionals,
                 collect_info=self._config.collect_solver_info,
             )
         elif self._config.dynamics_solver == "dvi":

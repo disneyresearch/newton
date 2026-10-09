@@ -1155,7 +1155,7 @@ def _update_penalty(
 ):
     """Adaptively updates the ADMM penalty parameter based on the configured strategy.
 
-    For BALANCED mode, rho is scaled up when the primal residual dominates and
+    For BALANCED mode, rho is scaled up (to ``config.rho_max``) when the primal residual dominates and
     scaled down (to ``config.rho_min``) when the dual residual dominates, every
     ``config.penalty_update_freq`` iterations.  For FIXED mode this is a no-op.
     """
@@ -1164,7 +1164,7 @@ def _update_penalty(
         if freq > 0 and iterations > 0 and iterations % freq == 0:
             rho = pen.rho
             if r_p > config.alpha * r_d:
-                rho = rho * config.tau
+                rho = wp.min(rho * config.tau, config.rho_max)
             elif r_d > config.alpha * r_p:
                 rho = wp.max(rho / config.tau, config.rho_min)
             pen.rho = rho

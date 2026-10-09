@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import warp as wp
 
-from ....config import PADMMSolverConfig
+from ....config import PADMMPrimalSolverConfig, PADMMSolverConfig
 from ...core.data import DataKamino
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
@@ -462,6 +462,10 @@ class PADMMSolver:
                 raise TypeError("All configs must be instances of PADMMSolver.Config")
         else:
             raise TypeError(f"Expected a single object or list of `PADMMSolver.Config`, got {type(config)}")
+
+        # Configurations expressed in the units of the primal algorithm must first be converted
+        if any(isinstance(c, PADMMPrimalSolverConfig) for c in config):
+            raise TypeError("Primal PADMM configs must be used with `PADMMPrimalSolver`.")
 
         # Return the validated config
         return config

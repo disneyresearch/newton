@@ -6,6 +6,7 @@
 from .dvi import DVISolver
 from .fk import ForwardKinematicsSolver
 from .padmm import PADMMSolver, PADMMWarmStartMode
+from .padmm_primal import PADMMPrimalSolver
 
 ###
 # Module interface
@@ -14,6 +15,7 @@ from .padmm import PADMMSolver, PADMMWarmStartMode
 __all__ = [
     "DVISolver",
     "ForwardKinematicsSolver",
+    "PADMMPrimalSolver",
     "PADMMSolver",
     "PADMMWarmStartMode",
 ]

@@ -8,7 +8,7 @@ Defines configurations for :class:`SolverKamino`.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from typing import Any, Literal
 
 import warp as wp
@@ -28,6 +28,7 @@ __all__ = [
     "DVIAPGDConfig",
     "DVISolverConfig",
     "ForwardKinematicsSolverConfig",
+    "PADMMPrimalSolverConfig",
     "PADMMSolverConfig",
 ]
 
@@ -516,6 +517,13 @@ class PADMMSolverConfig:
     Must be greater than zero. Defaults to `1e-5`.
     """
 
+    rho_max: float = math.inf
+    """
+    The upper-bound applied to the ALM penalty parameter.\n
+    Used to ensure numerical stability when adaptive penalty updates are used.\n
+    Must be greater than `rho_min`. Defaults to `inf`, i.e. no upper-bound.
+    """
+
     a_0: float = 1.0
     """
     The initial value of the acceleration parameter.\n
@@ -762,6 +770,8 @@ class PADMMSolverConfig:
             raise ValueError(f"Invalid initial ALM penalty: {self.rho_0}. Must be greater than zero.")
         if self.rho_min <= 0.0:
             raise ValueError(f"Invalid minimum ALM penalty: {self.rho_min}. Must be greater than zero.")
+        if self.rho_max <= self.rho_min:
+            raise ValueError(f"Invalid maximum ALM penalty: {self.rho_max}. Must be greater than `rho_min`.")
         if self.a_0 <= 0.0:
             raise ValueError(f"Invalid initial acceleration parameter: {self.a_0}. Must be greater than zero.")
         if self.alpha <= 1.0:
@@ -792,6 +802,105 @@ class PADMMSolverConfig:
     def __post_init__(self):
         """Post-initialization to validate configurations."""
         self.validate()
+
+
+@dataclass
+class PADMMPrimalSolverConfig(PADMMSolverConfig):
+    """
+    A container to hold configurations for the primal PADMM forward dynamics solver.
+
+    The primal PADMM operates on the generalized velocities of the system and is iterate-wise
+    equivalent to the (dual) PADMM with the inverse penalty. Accordingly, all configurations
+    are shared with :class:`PADMMSolverConfig`, except that they are expressed in the units and
+    conventions of the primal algorithm:
+
+    - The penalty parameters `rho_0`, `rho_min` and `rho_max` are in units of reaction per
+      velocity (i.e. mass), and are the inverses of the corresponding dual penalties.
+    - The `primal_tolerance` applies to the primal residual of the primal algorithm, i.e. the
+      constraint-velocity consistency, and the `dual_tolerance` to its dual residual, i.e. the
+      consistency of the trial and admissible constraint reactions.
+    """
+
+    rho_min: float = 0.0
+    """
+    The lower-bound applied to the primal ALM penalty parameter.\n
+    Must be non-negative. Defaults to `0.0`, i.e. no lower-bound.
+    """
+
+    rho_max: float = 1e5
+    """
+    The upper-bound applied to the primal ALM penalty parameter.\n
+    Used to ensure numerical stability when adaptive penalty updates are used.\n
+    Must be greater than `rho_min`. Defaults to `1e5`.
+    """
+
+    @override
+    @staticmethod
+    def register_custom_attributes(builder: ModelBuilder) -> None:
+        """
+        Registers custom attributes for the primal PADMM solver configurations with the given builder.
+
+        The primal PADMM solver shares the custom attributes registered by :class:`PADMMSolverConfig`.
+
+        Args:
+            builder: The model builder instance with which to register the custom attributes.
+        """
+
+    @override
+    @staticmethod
+    def from_model(model: Model, **kwargs: dict[str, Any]) -> PADMMPrimalSolverConfig:
+        """
+        Creates a :class:`PADMMPrimalSolverConfig` by attempting to
+        parse custom attributes from a :class:`Model` if available.
+
+        Args:
+            model: The Newton model from which to parse configurations.
+        """
+        cfg = PADMMPrimalSolverConfig(**kwargs)
+        parsed = PADMMSolverConfig.from_model(model)
+        defaults = PADMMSolverConfig()
+        for name in (
+            "max_iterations",
+            "primal_tolerance",
+            "dual_tolerance",
+            "compl_tolerance",
+            "warmstart_mode",
+            "use_acceleration",
+        ):
+            value = getattr(parsed, name)
+            if value != getattr(defaults, name):
+                setattr(cfg, name, value)
+        cfg.validate()
+        return cfg
+
+    def to_dual_units(self) -> PADMMSolverConfig:
+        """
+        Converts the configurations to those of the iterate-wise equivalent (dual) PADMM solver.
+
+        Returns:
+            The equivalent :class:`PADMMSolverConfig`, with inverted penalty
+            parameters and swapped primal and dual residual tolerances.
+        """
+        values = {f.name: getattr(self, f.name) for f in fields(PADMMSolverConfig)}
+        values["primal_tolerance"] = self.dual_tolerance
+        values["dual_tolerance"] = self.primal_tolerance
+        values["rho_0"] = 1.0 / self.rho_0
+        values["rho_min"] = 1.0 / self.rho_max
+        values["rho_max"] = 1.0 / self.rho_min if self.rho_min > 0.0 else math.inf
+        return PADMMSolverConfig(**values)
+
+    @override
+    def validate(self) -> None:
+        """
+        Validates the current values held by the :class:`PADMMPrimalSolverConfig` instance.
+        """
+        if self.rho_0 <= 0.0:
+            raise ValueError(f"Invalid initial ALM penalty: {self.rho_0}. Must be greater than zero.")
+        if self.rho_min < 0.0:
+            raise ValueError(f"Invalid minimum ALM penalty: {self.rho_min}. Must be non-negative.")
+        if not math.isfinite(self.rho_max) or self.rho_max <= self.rho_min:
+            raise ValueError(f"Invalid maximum ALM penalty: {self.rho_max}. Must be finite and greater than `rho_min`.")
+        self.to_dual_units().validate()
 
 
 @dataclass(kw_only=True)
