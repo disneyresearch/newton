@@ -60,7 +60,6 @@ A typical example for using this module is:
     # Compute the solution metrics after solving the dual problem
     metrics.reset()
     metrics.evaluate(
-        solver.state.sigma,
         solver.solution.lambdas,
         solver.solution.v_plus,
         model,
@@ -84,7 +83,7 @@ from ..core.data import DataKamino
 from ..core.model import ModelKamino
 from ..core.state import StateKamino
 from ..core.types import vec6f
-from ..dynamics.dual import DualProblem
+from ..dynamics.problem import ConstrainedDynamicsProblem
 from ..geometry.contacts import ContactsKamino
 from ..geometry.keying import build_pair_key2
 from ..kinematics.jacobians import DenseSystemJacobians, SparseSystemJacobians
@@ -464,64 +463,6 @@ class SolutionMetricsData:
 
 @wp.func
 def compute_v_plus(
-    dim: wp.int32,
-    vio: wp.int32,
-    mio: wp.int32,
-    sigma: wp.float32,
-    P: wp.array[wp.float32],
-    D_p: wp.array[wp.float32],
-    v_f_p: wp.array[wp.float32],
-    lambdas: wp.array[wp.float32],
-    v_plus: wp.array[wp.float32],
-):
-    """
-    Computes the post-event constraint-space velocity as:
-
-    `v_plus = P^-1 @ (v_f + (D_p - sigma * I_n) @ (P^-1 @ lambdas))`.
-
-    Where `P` is the diagonal preconditioning matrix, `D_p` is the
-    preconditioned Delassus matrix, `v_f_p` is the preconditioned
-    unconstrained constraint-space velocity, `lambdas` is the vector
-    of constraint reactions (i.e. Lagrange multipliers), and `I_n`
-    is the identity matrix of size `n x n`.
-
-    The preconditioned Delassus matrix `D_p` is stored using row-major order in a
-    flat array with allocation size `maxdim x maxdim`, starting from the matrix
-    index offset `mio`. The active dimensions of the `D_p` are `dim x dim`, where
-    `dim` is the number of active rows and columns.
-
-    The vectors `v_f_p, lambdas, v_plus` are stored in flat arrays
-    with dimensions `dim`, starting from the vector index offset `vio`.
-
-    Args:
-        maxdim: The maximum dimension of the matrix `A`.
-        dim: The active dimension of the matrix `A` and the vectors `x, b, c`.
-        vio: The vector index offset (i.e. start index) for the vectors `x, b, c`.
-        mio: The matrix index offset (i.e. start index) for the matrix `A`.
-        D_p: Input preconditioned Delassus matrix stored in row-major order.
-        v_f_p: Input preconditioned unconstrained constraint-space velocity vector.
-        lambdas: Input constraint reactions (i.e. Lagrange multipliers) vector.
-        v_plus: Output array to store the post-event constraint-space velocity vector.
-    """
-    v_f_p_i = float(0.0)
-    lambdas_j = float(0.0)
-    for i in range(dim):
-        v_i = vio + i
-        m_i = mio + dim * i
-        v_f_p_i = v_f_p[v_i]
-        inv_P_i = 1.0 / P[v_i]
-        lambdas_i = lambdas[v_i]
-        v_f_p_i -= sigma * inv_P_i * lambdas_i
-        for j in range(dim):
-            v_j = vio + j
-            inv_P_j = 1.0 / P[v_j]
-            lambdas_j = lambdas[v_j]
-            v_f_p_i += D_p[m_i + j] * inv_P_j * lambdas_j
-        v_plus[v_i] = inv_P_i * v_f_p_i
-
-
-@wp.func
-def compute_v_plus_sparse(
     dim: wp.int32,
     vio: wp.int32,
     P: wp.array[wp.float32],
@@ -1018,174 +959,6 @@ def _compute_dual_problem_metrics(
     problem_ccgo: wp.array[wp.int32],
     problem_dim: wp.array[wp.int32],
     problem_vio: wp.array[wp.int32],
-    problem_mio: wp.array[wp.int32],
-    problem_mu: wp.array[wp.float32],
-    problem_v_f: wp.array[wp.float32],
-    problem_D: wp.array[wp.float32],
-    problem_P: wp.array[wp.float32],
-    problem_bound_lower: wp.array[wp.float32],
-    problem_bound_upper: wp.array[wp.float32],
-    solution_sigma: wp.array[wp.vec2f],
-    solution_lambdas: wp.array[wp.float32],
-    solution_v_plus: wp.array[wp.float32],
-    # Buffers:
-    buffer_s: wp.array[wp.float32],
-    buffer_v: wp.array[wp.float32],
-    # Outputs:
-    metric_r_v_plus: wp.array[wp.float32],
-    metric_r_v_plus_argmax: wp.array[wp.int32],
-    metric_r_ncp_primal: wp.array[wp.float32],
-    metric_r_ncp_primal_argmax: wp.array[wp.int32],
-    metric_r_ncp_dual: wp.array[wp.float32],
-    metric_r_ncp_dual_argmax: wp.array[wp.int32],
-    metric_r_ncp_compl: wp.array[wp.float32],
-    metric_r_ncp_compl_argmax: wp.array[wp.int32],
-    metric_r_vi_natmap: wp.array[wp.float32],
-    metric_r_vi_natmap_argmax: wp.array[wp.int32],
-    metric_f_ncp: wp.array[wp.float32],
-    metric_f_ccp: wp.array[wp.float32],
-):
-    # Retrieve the thread index as the world index
-    wid = wp.tid()
-
-    # Retrieve the world-specific data
-    nbc = problem_nbc[wid]
-    nl = problem_nl[wid]
-    nc = problem_nc[wid]
-    ncts = problem_dim[wid]
-    bcio = problem_bcio[wid]
-    cio = problem_cio[wid]
-    bcgo = problem_bcgo[wid]
-    lcgo = problem_lcgo[wid]
-    ccgo = problem_ccgo[wid]
-    vio = problem_vio[wid]
-    mio = problem_mio[wid]
-    sigma = solution_sigma[wid]
-
-    # Compute additional info
-    njc = ncts - (nbc + nl + 3 * nc)
-
-    # Compute the post-event constraint-space velocity from the current solution: v_plus = v_f + D @ lambda
-    # NOTE: We assume the dual problem linear terms `D` and `v_f` have already been preconditioned in-place using `P`
-    compute_v_plus(ncts, vio, mio, sigma[0], problem_P, problem_D, problem_v_f, solution_lambdas, buffer_v)
-
-    # Compute the post-event constraint-space velocity error as: r_v_plus = || v_plus_est - v_plus_true ||_inf
-    r_v_plus, r_v_plus_argmax = compute_vector_difference_infnorm(ncts, vio, solution_v_plus, buffer_v)
-
-    # Compute the De Saxce correction for each contact as: s = G(v_plus)
-    compute_desaxce_corrections(nc, cio, vio, ccgo, problem_mu, buffer_v, buffer_s)
-
-    # Compute the CCP optimization objective as: f_ccp = 0.5 * lambda.dot(v_plus + v_f)
-    f_ccp = 0.5 * compute_double_dot_product(ncts, vio, solution_lambdas, buffer_v, problem_v_f)
-
-    # Compute the NCP optimization objective as:  f_ncp = f_ccp + lambda.dot(s)
-    f_ncp = compute_dot_product(ncts, vio, solution_lambdas, buffer_s)
-    f_ncp += f_ccp
-
-    # Compute the augmented post-event constraint-space velocity as: v_aug = v_plus + s
-    compute_vector_sum(ncts, vio, buffer_v, buffer_s, buffer_v)
-
-    # Compute the NCP primal residual as: r_p := || lambda - proj_C(lambda) ||_inf
-    r_ncp_p, r_ncp_p_argmax = compute_ncp_primal_residual(
-        nbc,
-        nl,
-        nc,
-        vio,
-        bcio,
-        bcgo,
-        lcgo,
-        ccgo,
-        cio,
-        problem_mu,
-        problem_bound_lower,
-        problem_bound_upper,
-        problem_P,
-        solution_lambdas,
-    )
-
-    # Compute the NCP dual residual as: r_d := || v_plus + s - proj_dual_K(v_plus + s)  ||_inf
-    r_ncp_d, r_ncp_d_argmax = compute_ncp_dual_residual(njc, nl, nc, vio, lcgo, ccgo, cio, problem_mu, buffer_v)
-
-    # Compute generalized complementarity for boxes, limits, and contacts.
-    r_ncp_c, r_ncp_c_argmax = compute_ncp_complementarity_residual(
-        nbc,
-        nl,
-        nc,
-        vio,
-        bcio,
-        bcgo,
-        lcgo,
-        ccgo,
-        problem_bound_lower,
-        problem_bound_upper,
-        problem_P,
-        buffer_v,
-        solution_lambdas,
-    )
-
-    # Compute the natural-map residual as: r_natmap = || lambda - proj_C(lambda - (v + s)) ||_inf
-    r_ncp_natmap, r_ncp_natmap_argmax = compute_ncp_natural_map_residual(
-        njc,
-        nbc,
-        nl,
-        nc,
-        vio,
-        bcio,
-        bcgo,
-        lcgo,
-        ccgo,
-        cio,
-        problem_mu,
-        problem_bound_lower,
-        problem_bound_upper,
-        problem_P,
-        buffer_v,
-        solution_lambdas,
-    )
-
-    lambdas_has_nan = _vector_has_nan(ncts, vio, solution_lambdas)
-    if lambdas_has_nan or _vector_has_nan(ncts, vio, buffer_v) or _vector_has_nan(nc, cio, problem_mu):
-        r_ncp_p = wp.nan
-        r_ncp_p_argmax = wp.int32(-1)
-        r_ncp_d = wp.nan
-        r_ncp_d_argmax = wp.int32(-1)
-        r_ncp_c = wp.nan
-        r_ncp_c_argmax = wp.int32(-1)
-        r_ncp_natmap = wp.nan
-        r_ncp_natmap_argmax = wp.int32(-1)
-
-    if lambdas_has_nan or _vector_has_nan(ncts, vio, problem_v_f):
-        f_ncp = wp.nan
-        f_ccp = wp.nan
-
-    # Store the computed metrics in the output arrays
-    metric_r_v_plus[wid] = r_v_plus
-    metric_r_v_plus_argmax[wid] = r_v_plus_argmax
-    metric_r_ncp_primal[wid] = r_ncp_p
-    metric_r_ncp_primal_argmax[wid] = r_ncp_p_argmax
-    metric_r_ncp_dual[wid] = r_ncp_d
-    metric_r_ncp_dual_argmax[wid] = r_ncp_d_argmax
-    metric_r_ncp_compl[wid] = r_ncp_c
-    metric_r_ncp_compl_argmax[wid] = r_ncp_c_argmax
-    metric_r_vi_natmap[wid] = r_ncp_natmap
-    metric_r_vi_natmap_argmax[wid] = r_ncp_natmap_argmax
-    metric_f_ncp[wid] = f_ncp
-    metric_f_ccp[wid] = f_ccp
-
-
-@wp.kernel
-def _compute_dual_problem_metrics_sparse(
-    # Inputs:
-    problem_nbc: wp.array[wp.int32],
-    problem_nl: wp.array[wp.int32],
-    problem_nc: wp.array[wp.int32],
-    problem_bcio: wp.array[wp.int32],
-    problem_cio: wp.array[wp.int32],
-    problem_bcgo: wp.array[wp.int32],
-    problem_lcgo: wp.array[wp.int32],
-    problem_ccgo: wp.array[wp.int32],
-    problem_dim: wp.array[wp.int32],
-    problem_vio: wp.array[wp.int32],
     problem_mu: wp.array[wp.float32],
     problem_v_f: wp.array[wp.float32],
     problem_P: wp.array[wp.float32],
@@ -1231,7 +1004,7 @@ def _compute_dual_problem_metrics_sparse(
     # Compute the post-event constraint-space velocity from the current solution: v_plus = v_f + D @ lambda
     # NOTE: We assume the dual problem term `v_f` has already been preconditioned in-place using `P`, and
     #       D @ lambdas is already provided in `buffer_v`
-    compute_v_plus_sparse(ncts, vio, problem_P, problem_v_f, buffer_v, buffer_v)
+    compute_v_plus(ncts, vio, problem_P, problem_v_f, buffer_v, buffer_v)
 
     # Compute the post-event constraint-space velocity error as: r_v_plus = || v_plus_est - v_plus_true ||_inf
     r_v_plus, r_v_plus_argmax = compute_vector_difference_infnorm(ncts, vio, solution_v_plus, buffer_v)
@@ -1453,13 +1226,12 @@ class SolutionMetrics:
 
     def evaluate(
         self,
-        sigma: wp.array[wp.vec2f],
         lambdas: wp.array[wp.float32],
         v_plus: wp.array[wp.float32],
         model: ModelKamino,
         data: DataKamino,
         state_p: StateKamino,
-        problem: DualProblem,
+        problem: ConstrainedDynamicsProblem,
         jacobians: DenseSystemJacobians | SparseSystemJacobians,
         limits: LimitsKamino | None = None,
         contacts: ContactsKamino | None = None,
@@ -1468,21 +1240,20 @@ class SolutionMetrics:
         Evaluates all solution performance metrics.
 
         Args:
+            lambdas: The array of constraint reactions (i.e. Lagrange multipliers) of the current solution.
+            v_plus: The array of post-event constraint-space velocities of the current solution.
             model: The model containing the time-invariant data of the simulation.
             data: The model data containing the time-variant data of the simulation.
             state_p: The previous state of the simulation.
+            problem: The forward dynamics problem of the current time-step.
+            jacobians: The system Jacobians of the current time-step.
             limits: The joint-limits data describing active limit constraints.
             contacts: The contact data describing active contact constraints.
-            problem: The dual forward dynamics problem of the current time-step.
-            jacobians: The system Jacobians of the current time-step.
-            sigma: The array diagonal regularization applied to the Delassus matrix of the current dual problem.
-            lambdas: The array of constraint reactions (i.e. Lagrange multipliers) of the current dual problem solution.
-            v_plus: The array of post-event constraint-space velocities of the current dual problem solution.
         """
         self._assert_has_data()
         self._evaluate_constraint_violations_perf(model, data, limits, contacts)
         self._evaluate_primal_problem_perf(model, data, state_p, jacobians)
-        self._evaluate_dual_problem_perf(sigma, lambdas, v_plus, problem)
+        self._evaluate_dual_problem_perf(lambdas, v_plus, problem)
 
     ###
     # Internals
@@ -1665,121 +1436,64 @@ class SolutionMetrics:
 
     def _evaluate_dual_problem_perf(
         self,
-        sigma: wp.array[wp.vec2f],
         lambdas: wp.array[wp.float32],
         v_plus: wp.array[wp.float32],
-        problem: DualProblem,
+        problem: ConstrainedDynamicsProblem,
     ):
         """
         Evaluates the dual problem performance metrics.
 
         Args:
-            problem: The dual problem containing the time-invariant and time-variant data of the simulation.
-            sigma: The array of sigma values for the dual problem.
             lambdas: The array of lambda values for the dual problem.
             v_plus: The array of v_plus values for the dual problem.
+            problem: The forward dynamics problem containing the time-variant data of the simulation.
         """
         # Ensure metrics data is available
         self._assert_has_data()
 
+        # Compute the unregularized and unpreconditioned product (D + R) @ lambda of the post-event
+        # constraint-space velocity `v_plus = v_f + (D + R) @ lambda` and store it in the buffer
+        problem.gemv(x=lambdas, y=self._buffer_v, preconditioned=False)
+
         # Compute the dual problem NCP/VI performance metrics
-        if problem.sparse:
-            # Compute post-event constraint-space velocity from solution: v_plus = v_f + D @ lambda
-            # Store it in buffer for further processing in dual problem metrics computation
-            delassus_reg_prev = problem.delassus._eta
-            delassus_pre_prev = problem.delassus._preconditioner
-            problem.delassus.set_regularization(None)
-            problem.delassus.set_preconditioner(None)
-            problem.delassus.matvec(
-                x=lambdas,
-                y=self._buffer_v,
-                world_mask=wp.ones((problem.data.num_worlds,), dtype=wp.bool, device=self.device),
-            )
-            problem.delassus.set_regularization(delassus_reg_prev)
-            problem.delassus.set_preconditioner(delassus_pre_prev)
-            wp.launch(
-                kernel=_compute_dual_problem_metrics_sparse,
-                dim=problem.size.num_worlds,
-                inputs=[
-                    # Inputs:
-                    problem.data.nbc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.bcio,
-                    problem.data.cio,
-                    problem.data.bcgo,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.dim,
-                    problem.data.vio,
-                    problem.data.mu,
-                    problem.data.v_f,
-                    problem.data.P,
-                    problem.data.bound_lower,
-                    problem.data.bound_upper,
-                    lambdas,
-                    v_plus,
-                    # Buffers:
-                    self._buffer_s,
-                    self._buffer_v,
-                    # Outputs:
-                    self._data.r_v_plus,
-                    self._data.r_v_plus_argmax,
-                    self._data.r_ncp_primal,
-                    self._data.r_ncp_primal_argmax,
-                    self._data.r_ncp_dual,
-                    self._data.r_ncp_dual_argmax,
-                    self._data.r_ncp_compl,
-                    self._data.r_ncp_compl_argmax,
-                    self._data.r_vi_natmap,
-                    self._data.r_vi_natmap_argmax,
-                    self._data.f_ncp,
-                    self._data.f_ccp,
-                ],
-                device=problem.device,
-            )
-        else:
-            wp.launch(
-                kernel=_compute_dual_problem_metrics,
-                dim=problem.size.num_worlds,
-                inputs=[
-                    # Inputs:
-                    problem.data.nbc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.bcio,
-                    problem.data.cio,
-                    problem.data.bcgo,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.dim,
-                    problem.data.vio,
-                    problem.data.mio,
-                    problem.data.mu,
-                    problem.data.v_f,
-                    problem.data.D,
-                    problem.data.P,
-                    problem.data.bound_lower,
-                    problem.data.bound_upper,
-                    sigma,
-                    lambdas,
-                    v_plus,
-                    # Buffers:
-                    self._buffer_s,
-                    self._buffer_v,
-                    # Outputs:
-                    self._data.r_v_plus,
-                    self._data.r_v_plus_argmax,
-                    self._data.r_ncp_primal,
-                    self._data.r_ncp_primal_argmax,
-                    self._data.r_ncp_dual,
-                    self._data.r_ncp_dual_argmax,
-                    self._data.r_ncp_compl,
-                    self._data.r_ncp_compl_argmax,
-                    self._data.r_vi_natmap,
-                    self._data.r_vi_natmap_argmax,
-                    self._data.f_ncp,
-                    self._data.f_ccp,
-                ],
-                device=problem.device,
-            )
+        wp.launch(
+            kernel=_compute_dual_problem_metrics,
+            dim=problem.size.num_worlds,
+            inputs=[
+                # Inputs:
+                problem.data.nbc,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.bcio,
+                problem.data.cio,
+                problem.data.bcgo,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.dim,
+                problem.data.vio,
+                problem.data.mu,
+                problem.data.v_f,
+                problem.data.P,
+                problem.data.bound_lower,
+                problem.data.bound_upper,
+                lambdas,
+                v_plus,
+                # Buffers:
+                self._buffer_s,
+                self._buffer_v,
+                # Outputs:
+                self._data.r_v_plus,
+                self._data.r_v_plus_argmax,
+                self._data.r_ncp_primal,
+                self._data.r_ncp_primal_argmax,
+                self._data.r_ncp_dual,
+                self._data.r_ncp_dual_argmax,
+                self._data.r_ncp_compl,
+                self._data.r_ncp_compl_argmax,
+                self._data.r_vi_natmap,
+                self._data.r_vi_natmap_argmax,
+                self._data.f_ncp,
+                self._data.f_ccp,
+            ],
+            device=problem.device,
+        )

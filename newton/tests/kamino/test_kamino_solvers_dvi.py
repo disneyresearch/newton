@@ -358,7 +358,6 @@ def _evaluate_solution_metrics(test: TestSetup, solver: DVISolver) -> dict[str, 
     integrate_euler_semi_implicit(model=test.model, data=test.data)
     metrics = SolutionMetrics(model=test.model)
     metrics.evaluate(
-        sigma=solver.data.state.sigma,
         lambdas=solver.data.solution.lambdas,
         v_plus=solver.data.solution.v_plus,
         model=test.model,

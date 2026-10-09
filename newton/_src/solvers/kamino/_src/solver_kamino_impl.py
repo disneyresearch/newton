@@ -28,6 +28,7 @@ from .core.model import ModelKamino
 from .core.state import StateKamino
 from .core.time import advance_time
 from .dynamics.dual import DualProblem
+from .dynamics.problem import ConstrainedDynamicsProblem
 from .dynamics.wrenches import (
     compute_constraint_body_wrenches,
     compute_joint_dof_body_wrenches,
@@ -362,9 +363,9 @@ class SolverKaminoImpl(SolverBase):
         return self._data
 
     @property
-    def problem_fd(self) -> DualProblem:
+    def problem_fd(self) -> ConstrainedDynamicsProblem:
         """
-        Returns the dual forward dynamics problem.
+        Returns the forward dynamics problem.
         """
         return self._problem_fd
 
@@ -1178,7 +1179,6 @@ class SolverKaminoImpl(SolverBase):
         if self._config.compute_solution_metrics:
             self.metrics.reset()
             self._metrics.evaluate(
-                sigma=self._solver_fd.data.state.sigma,
                 lambdas=self._solver_fd.data.solution.lambdas,
                 v_plus=self._solver_fd.data.solution.v_plus,
                 model=self._model,

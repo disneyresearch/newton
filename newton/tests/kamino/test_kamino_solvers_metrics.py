@@ -391,7 +391,6 @@ class TestSolverMetrics(unittest.TestCase):
 
         # Define a trivial solution (all zeros)
         with wp.ScopedDevice(test.model.device):
-            sigma = wp.zeros(test.model.size.num_worlds, dtype=wp.vec2f)
             lambdas = wp.zeros(test.model.size.sum_of_max_total_cts, dtype=wp.float32)
             v_plus = wp.zeros(test.model.size.sum_of_max_total_cts, dtype=wp.float32)
 
@@ -409,7 +408,6 @@ class TestSolverMetrics(unittest.TestCase):
         # Compute the metrics on the trivial solution
         metrics.reset()
         metrics.evaluate(
-            sigma=sigma,
             lambdas=lambdas,
             v_plus=v_plus,
             model=test.model,
@@ -509,7 +507,6 @@ class TestSolverMetrics(unittest.TestCase):
         # Compute the metrics on the trivial solution
         metrics.reset()
         metrics.evaluate(
-            sigma=solver.data.state.sigma,
             lambdas=solver.data.solution.lambdas,
             v_plus=solver.data.solution.v_plus,
             model=test.model,
@@ -595,7 +592,6 @@ class TestSolverMetrics(unittest.TestCase):
 
         # Compute the metrics on the trivial solution
         metrics.evaluate(
-            sigma=solver.data.state.sigma,
             lambdas=solver.data.solution.lambdas,
             v_plus=solver.data.solution.v_plus,
             model=test.model,
@@ -693,7 +689,6 @@ class TestSolverMetrics(unittest.TestCase):
 
         # Compute the metrics on the solution
         metrics.evaluate(
-            sigma=solver.data.state.sigma,
             lambdas=solver.data.solution.lambdas,
             v_plus=solver.data.solution.v_plus,
             model=test.model,
@@ -788,7 +783,7 @@ class TestSolverMetrics(unittest.TestCase):
         integrate_euler_semi_implicit(model=test.model, data=test.data)
 
         solver._initialize()
-        solver._update_sparse_regularization(problem_sparse)
+        solver._update_problem_regularization(problem_sparse)
         problem_sparse.delassus.update()
 
         # Perturb problem to have non-trivial metrics
@@ -804,7 +799,6 @@ class TestSolverMetrics(unittest.TestCase):
 
         # Compute the metrics on the solution
         metrics_dense.evaluate(
-            sigma=solver.data.state.sigma,
             lambdas=solver.data.solution.lambdas,
             v_plus=solver.data.solution.v_plus,
             model=test.model,
@@ -816,7 +810,6 @@ class TestSolverMetrics(unittest.TestCase):
             contacts=test.contacts,
         )
         metrics_sparse.evaluate(
-            sigma=solver.data.state.sigma,
             lambdas=solver.data.solution.lambdas,
             v_plus=solver.data.solution.v_plus,
             model=test.model,
@@ -1040,7 +1033,6 @@ class TestSolverMetrics(unittest.TestCase):
                 test.build()
                 metrics = SolutionMetrics(model=test.model)
                 with wp.ScopedDevice(test.model.device):
-                    sigma = wp.zeros(test.model.size.num_worlds, dtype=wp.vec2f)
                     lambdas = wp.zeros(test.model.size.sum_of_max_total_cts, dtype=wp.float32)
                     v_plus = wp.zeros(test.model.size.sum_of_max_total_cts, dtype=wp.float32)
                 lambda_values = lambdas.numpy()
@@ -1049,7 +1041,7 @@ class TestSolverMetrics(unittest.TestCase):
                 lambdas.assign(lambda_values)
 
                 metrics.reset()
-                metrics._evaluate_dual_problem_perf(sigma, lambdas, v_plus, test.problem)
+                metrics._evaluate_dual_problem_perf(lambdas, v_plus, test.problem)
 
                 for metric_name in (
                     "r_v_plus",
@@ -1081,7 +1073,6 @@ class TestSolverMetrics(unittest.TestCase):
                     test.build()
                     metrics = SolutionMetrics(model=test.model)
                     with wp.ScopedDevice(test.model.device):
-                        sigma = wp.zeros(test.model.size.num_worlds, dtype=wp.vec2f)
                         lambdas = wp.zeros(test.model.size.sum_of_max_total_cts, dtype=wp.float32)
                         v_plus = wp.zeros(test.model.size.sum_of_max_total_cts, dtype=wp.float32)
                     vio = test.problem.data.vio.numpy()[0]
@@ -1101,7 +1092,7 @@ class TestSolverMetrics(unittest.TestCase):
                         test.problem.data.mu.assign(values)
 
                     metrics.reset()
-                    metrics._evaluate_dual_problem_perf(sigma, lambdas, v_plus, test.problem)
+                    metrics._evaluate_dual_problem_perf(lambdas, v_plus, test.problem)
                     if input_name == "mu":
                         self.assertTrue(np.isfinite(metrics.data.r_v_plus.numpy()[0]))
                     else:

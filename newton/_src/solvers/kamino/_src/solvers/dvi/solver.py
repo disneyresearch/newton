@@ -204,6 +204,8 @@ class DVISolver:
         """
         if model is None or not isinstance(model, ModelKamino):
             raise ValueError("A model of type `ModelKamino` must be provided.")
+        if problem is not None and not isinstance(problem, DualProblem):
+            raise TypeError(f"DVI requires a `DualProblem` formulation, but got `{type(problem).__name__}`.")
 
         self._size = model.size
         self._device = model.device
@@ -534,6 +536,8 @@ class DVISolver:
         Args:
             problem: Unified Kamino dual problem to solve.
         """
+        if not isinstance(problem, DualProblem):
+            raise TypeError(f"DVI requires a `DualProblem` formulation, but got `{type(problem).__name__}`.")
         self._allocate_projection_workspace(problem)
         wp.launch(
             kernel=_reset_dvi_status,

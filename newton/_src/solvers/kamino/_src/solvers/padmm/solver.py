@@ -17,9 +17,10 @@ from ....config import PADMMSolverConfig
 from ...core.data import DataKamino
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
-from ...dynamics.dual import DualProblem
+from ...dynamics.problem import ConstrainedDynamicsProblem
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
+from ...linalg.linear import IterativeSolver
 from ...utils.tile import get_block_dim, get_tile_size
 from .kernels import (
     _apply_dual_preconditioner_to_solution,
@@ -35,14 +36,12 @@ from .kernels import (
     _project_to_feasible_cone,
     _reset_solver_data,
     _scale_warmstart_forces,
-    _update_delassus_proximal_regularization,
-    _update_delassus_proximal_regularization_sparse,
+    _update_problem_proximal_regularization,
     _warmstart_contact_constraints,
     _warmstart_desaxce_correction,
     _warmstart_joint_constraints,
     _warmstart_limit_constraints,
     make_collect_solver_info_kernel,
-    make_collect_solver_info_kernel_sparse,
     make_desaxce_correction_and_velocity_bias_kernel,
     make_initialize_solver_kernel,
     make_update_dual_variables_and_compute_primal_dual_residuals,
@@ -77,13 +76,15 @@ class PADMMSolver:
     """
     The Proximal-ADMM (PADMM) forward dynamics solver for constrained rigid multi-body systems.
 
-    This solver implements the Proximal-ADMM algorithm to solve the Lagrange dual of the
-    constrained forward dynamics problem in constraint reactions (i.e. impulses) and
-    post-event constraint-space velocities.
+    This solver implements the Proximal-ADMM algorithm to solve the constrained forward
+    dynamics problem in constraint reactions (i.e. impulses) and post-event constraint-space
+    velocities.
 
     Notes:
-    - is designed to work with the DualProblem formulation.
-    - operates on the Lagrange dual of the constrained forward dynamics problem.
+    - operates on any :class:`ConstrainedDynamicsProblem` formulation, whose linear operator
+      realizes the regularized solve `x = (P (D + R) P + (eta + rho) I)^{-1} v` in its own space.
+    - the iterates are those of the Lagrange dual of the constrained forward dynamics problem,
+      which are identical to those of the primal PADMM with penalty `1 / rho`.
     - is based on the Proximal-ADMM algorithm, which introduces a proximal regularization term
     - supports multiple penalty update methods, including fixed, linear, and spectral updates.
     - can be configured with various tolerances, penalty parameters, and other settings.
@@ -221,7 +222,7 @@ class PADMMSolver:
 
         # Ensure the model is valid
         if model is None:
-            raise ValueError("A model of type `ModelKamino` must be provided to allocate the Delassus operator.")
+            raise ValueError("A model of type `ModelKamino` must be provided to allocate the solver.")
         elif not isinstance(model, ModelKamino):
             raise ValueError("Invalid model provided. Must be an instance of `ModelKamino`.")
 
@@ -273,7 +274,6 @@ class PADMMSolver:
         # Specialize certain solver kernels depending on whether acceleration is enabled
         self._initialize_solver_kernel = make_initialize_solver_kernel(self._use_acceleration)
         self._collect_solver_info_kernel = make_collect_solver_info_kernel(self._use_acceleration)
-        self._collect_solver_info_kernel_sparse = make_collect_solver_info_kernel_sparse(self._use_acceleration)
         self._update_dual_variables_and_compute_primal_dual_residuals_kernel = (
             make_update_dual_variables_and_compute_primal_dual_residuals(self._use_acceleration)
         )
@@ -281,7 +281,7 @@ class PADMMSolver:
         block_dim = get_block_dim(tile_size, ratio=2, min_size=1)
         self._project_dual_convergence_accel_kernel = _make_project_dual_convergence_accel_kernel(block_dim)
 
-    def reset(self, problem: DualProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
+    def reset(self, problem: ConstrainedDynamicsProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """
         Resets the persistent solution cache used for internal warm-starting, for all worlds
         or the subset selected by `world_mask`.
@@ -296,7 +296,7 @@ class PADMMSolver:
         # Otherwise, only the solution cache of the specified worlds
         else:
             if problem is None:
-                raise ValueError("A `DualProblem` instance must be provided when a world mask is used.")
+                raise ValueError("A `ConstrainedDynamicsProblem` instance must be provided when a world mask is used.")
             wp.launch(
                 kernel=_reset_solver_data,
                 dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
@@ -320,7 +320,7 @@ class PADMMSolver:
 
     def warmstart(
         self,
-        problem: DualProblem,
+        problem: ConstrainedDynamicsProblem,
         model: ModelKamino,
         data: DataKamino,
         limits: LimitsKamino | None = None,
@@ -335,7 +335,7 @@ class PADMMSolver:
         - `PADMMWarmStartMode.CONTAINERS`: Warm-starts from the provided limits and contacts containers.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
                 This is needed during warm-starts in order to access the problem preconditioning.
             model: The model associated with the problem.
             data: The model data associated with the problem.
@@ -362,7 +362,7 @@ class PADMMSolver:
 
         self._scale_warmstart_forces(problem)
 
-    def _scale_warmstart_forces(self, problem: DualProblem):
+    def _scale_warmstart_forces(self, problem: ConstrainedDynamicsProblem):
         """Scales the warm-started primal and slack force iterates."""
         x_0 = self._data.state.x_p
         y_0 = self._data.state.y_hat if self._use_acceleration else self._data.state.y_p
@@ -381,28 +381,29 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def solve(self, problem: DualProblem):
+    def solve(self, problem: ConstrainedDynamicsProblem):
         """
         Solves the given dual problem using PADMM.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Pass the PADMM-owned tolerance array to the iterative linear solver (if present), so the
         # inexact-ADMM tolerance schedule (set in the convergence kernel) drives the inner solve.
-        inner = getattr(problem._delassus._solver, "solver", None)
+        linear_solver = problem.linear_solver
+        inner = getattr(linear_solver, "solver", None)
         if inner is not None:
             inner.atol = self._data.linear_solver_atol
-        elif problem.sparse:
+        elif isinstance(linear_solver, IterativeSolver):
             # The fused single-kernel CR has no wrapped ``solver``; it reads its own ``.atol`` array
             # live each solve (see ConjugateResidualSolverFused._solve_impl).
-            problem._delassus._solver.atol = self._data.linear_solver_atol
+            linear_solver.atol = self._data.linear_solver_atol
 
         # Initialize the solver status, ALM penalty, and iterative solver tolerance
         self._initialize()
 
-        # Add the diagonal proximal regularization to the Delassus matrix
-        # D_{eta,rho} := D + (eta + rho) * I_{ncts}
+        # Add the diagonal proximal regularization to the linear system of the problem, e.g.
+        # D_{eta,rho} := D + (eta + rho) * I_{ncts} for the dual formulation
         self._update_regularization(problem)
 
         # Reset the solver info to zero if collection is enabled
@@ -491,10 +492,10 @@ class PADMMSolver:
         # converges or reaches the maximum number of iterations
         self._data.state.done.fill_(self._size.num_worlds)
 
-    def _update_sparse_regularization(self, problem: DualProblem):
-        """Propagate eta + rho to the sparse Delassus diagonal regularization."""
+    def _update_problem_regularization(self, problem: ConstrainedDynamicsProblem):
+        """Propagate eta + rho to the diagonal regularization of the problem's linear system."""
         wp.launch(
-            kernel=_update_delassus_proximal_regularization_sparse,
+            kernel=_update_problem_proximal_regularization,
             dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
             inputs=[
                 problem.data.dim,
@@ -502,69 +503,49 @@ class PADMMSolver:
                 self._data.config,
                 self._data.penalty,
                 self._data.status,
-                problem.delassus._eta,
+                problem.data.eta,
             ],
             device=self.device,
         )
-        # Only eta changed (not the Jacobian sparsity), so flag a regularization-only refresh:
-        # a raw-Jacobian solver (fused CR) refreshes its combined regularization and skips the
-        # index rebuild + segmented sort, which is both wasted work per PADMM iteration and unsafe
-        # inside wp.capture_while (the sort allocates).
-        problem.delassus.set_regularization_needs_update()
+        # For sparse problems only eta changed (not the Jacobian sparsity), so this triggers a
+        # regularization-only refresh: a raw-Jacobian solver (fused CR) refreshes its combined
+        # regularization and skips the index rebuild + segmented sort, which is both wasted work
+        # per PADMM iteration and unsafe inside wp.capture_while (the sort allocates).
+        problem.update_regularization()
 
-    def _refresh_solver_regularization(self, problem: DualProblem):
-        """Re-record a raw-Jacobian solver's combined-eta refresh after an in-loop (adaptive-penalty)
-        eta update, so the new regularization is captured inside ``wp.capture_while``.
+    def _update_regularization(self, problem: ConstrainedDynamicsProblem):
+        """
+        Updates the diagonal regularization of the problem's linear system with the proximal regularization
+        terms and performs any necessary pre-computations, e.g. matrix factorizations for direct solvers.
+
+        Args:
+            problem: The forward dynamics problem to be solved.
+        """
+        self._update_problem_regularization(problem)
+        # Let a raw-Jacobian linear solver (e.g. the fused single-kernel CR) rebuild its
+        # per-step index structures here, before the (possibly graph-captured) iteration loop,
+        # so that one-off work stays out of the replayed graph. No-op for other solvers.
+        problem.prepare_solve()
+
+    def _update_adaptive_regularization(self, problem: ConstrainedDynamicsProblem):
+        """
+        Propagates an in-loop (adaptive-penalty) update of rho to the problem's linear system.
 
         Under graph-conditional capture the iteration body is traced once: the lazy refresh inside the
         linear solve runs *before* the eta update in that single trace, so it might skip the update
         because the (host-side) flags that signal an update have been cleared before the loop start.
         The replayed graph then never picks up the per-iteration eta update (-> divergence/NaN).
-        Calling ``prepare_solve`` here, *after* the update, records the refresh in the body."""
-        if problem.sparse:
-            problem._delassus._solver.prepare_solve()
-
-    def _update_regularization(self, problem: DualProblem):
+        Calling ``prepare_solve`` here, *after* the update, records the refresh in the body.
         """
-        Updates the diagonal regularization of the lhs matrix with the proximal regularization terms.
-        For `DualProblem` solves, the lhs matrix corresponds to the Delassus matrix.
-        The kernel is parallelized over the number of worlds and the maximum number of total constraints.
+        self._update_problem_regularization(problem)
+        problem.prepare_solve()
 
-        Args:
-            problem: The dual forward dynamics problem to be solved.
-        """
-        if problem.sparse:
-            self._update_sparse_regularization(problem)
-            # Let a raw-Jacobian linear solver (e.g. the fused single-kernel CR) rebuild its
-            # per-step index structures here, before the (possibly graph-captured) iteration loop,
-            # so that one-off work stays out of the replayed graph. No-op for other solvers.
-            problem._delassus._solver.prepare_solve()
-        else:
-            # Update the proximal regularization term in the Delassus matrix
-            wp.launch(
-                kernel=_update_delassus_proximal_regularization,
-                dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
-                inputs=[
-                    # Inputs:
-                    problem.data.dim,
-                    problem.data.mio,
-                    self._data.status,
-                    self._data.state.sigma,
-                    # Outputs:
-                    problem.data.D,
-                ],
-                device=self.device,
-            )
-
-            # Compute Cholesky/LDLT factorization of the Delassus matrix
-            problem._delassus.compute(reset_to_zero=True)
-
-    def _step(self, problem: DualProblem):
+    def _step(self, problem: ConstrainedDynamicsProblem):
         """
         Performs a single PADMM solver iteration.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Compute De Saxce correction and velocity bias in one launch.
         self._update_desaxce_and_velocity_bias(problem, self._data.state.y_p, self._data.state.z_p)
@@ -584,10 +565,9 @@ class PADMMSolver:
         # Compute infinity-norm of all residuals and check for convergence
         self._update_convergence_check(problem)
 
-        # Update sparse Delassus regularization if penalty was updated adaptively
+        # Update the sparse problem regularization if the penalty was updated adaptively
         if problem.sparse and self._use_adaptive_penalty:
-            self._update_sparse_regularization(problem)
-            self._refresh_solver_regularization(problem)
+            self._update_adaptive_regularization(problem)
 
         # Optionally record internal solver info
         if self._collect_info:
@@ -596,7 +576,7 @@ class PADMMSolver:
         # Update caches of previous state variables
         self._update_previous_state()
 
-    def _step_accel(self, problem: DualProblem):
+    def _step_accel(self, problem: ConstrainedDynamicsProblem):
         """
         Performs a single PADMM solver iteration with Nesterov acceleration.
 
@@ -606,7 +586,7 @@ class PADMMSolver:
           residual reduction, convergence, acceleration, and previous-state caching
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Compute De Saxce correction and velocity bias in one launch.
         self._update_desaxce_and_velocity_bias(problem, self._data.state.y_hat, self._data.state.z_hat)
@@ -617,10 +597,9 @@ class PADMMSolver:
         # Advance projection, dual update, residual status, and acceleration state.
         self._update_projection_dual_convergence_accel(problem)
 
-        # Update sparse Delassus regularization if penalty was updated adaptively
+        # Update the sparse problem regularization if the penalty was updated adaptively
         if problem.sparse and self._use_adaptive_penalty:
-            self._update_sparse_regularization(problem)
-            self._refresh_solver_regularization(problem)
+            self._update_adaptive_regularization(problem)
 
         # Optionally record internal solver info from the fused status/state.
         if self._collect_info:
@@ -632,12 +611,12 @@ class PADMMSolver:
     # Internals - Warm-starting
     ###
 
-    def _warmstart_desaxce_correction(self, problem: DualProblem, z: wp.array[wp.float32]):
+    def _warmstart_desaxce_correction(self, problem: ConstrainedDynamicsProblem, z: wp.array[wp.float32]):
         """
         Applies the De Saxce correction to the provided post-event constraint-space velocity warm-start.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
                 This is needed during warm-starts in order to access the problem preconditioning.
             z: The post-event constraint-space velocity warm-start variable.
                 This can either be `z_p` or `z_hat` depending on whether acceleration is used.
@@ -662,7 +641,7 @@ class PADMMSolver:
         self,
         model: ModelKamino,
         data: DataKamino,
-        problem: DualProblem,
+        problem: ConstrainedDynamicsProblem,
         x_0: wp.array[wp.float32],
         y_0: wp.array[wp.float32],
         z_0: wp.array[wp.float32],
@@ -673,7 +652,7 @@ class PADMMSolver:
         Args:
             model: The model associated with the problem.
             data: The model data associated with the problem.
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
                 This is needed during warm-starts in order to access the problem preconditioning.
             x_0: The output primal variables array to be warm-started.
             y_0: The output slack variables array to be warm-started.
@@ -722,7 +701,7 @@ class PADMMSolver:
         model: ModelKamino,
         data: DataKamino,
         limits: LimitsKamino,
-        problem: DualProblem,
+        problem: ConstrainedDynamicsProblem,
         x_0: wp.array[wp.float32],
         y_0: wp.array[wp.float32],
         z_0: wp.array[wp.float32],
@@ -734,7 +713,7 @@ class PADMMSolver:
             model: The model associated with the problem.
             data: The model data associated with the problem.
             limits: The limits container associated with the model.
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
                 This is needed during warm-starts in order to access the problem preconditioning.
             x_0: The output primal variables array to be warm-started.
             y_0: The output slack variables array to be warm-started.
@@ -767,7 +746,7 @@ class PADMMSolver:
         model: ModelKamino,
         data: DataKamino,
         contacts: ContactsKamino,
-        problem: DualProblem,
+        problem: ConstrainedDynamicsProblem,
         x_0: wp.array[wp.float32],
         y_0: wp.array[wp.float32],
         z_0: wp.array[wp.float32],
@@ -779,7 +758,7 @@ class PADMMSolver:
             model: The model associated with the problem.
             data: The model data associated with the problem.
             contacts: The contacts container associated with the model.
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
                 This is needed during warm-starts in order to access the problem preconditioning.
             x_0: The output primal variables array to be warm-started.
             y_0: The output slack variables array to be warm-started.
@@ -808,12 +787,12 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _warmstart_from_solution(self, problem: DualProblem):
+    def _warmstart_from_solution(self, problem: ConstrainedDynamicsProblem):
         """
         Warm-starts the internal solver state from the stored solution variables.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
                 This is needed during warm-starts in order to access the problem preconditioning.
         """
         # Apply the dual-problem preconditioner to the stored solution
@@ -850,7 +829,7 @@ class PADMMSolver:
 
     def _warmstart_from_containers(
         self,
-        problem: DualProblem,
+        problem: ConstrainedDynamicsProblem,
         model: ModelKamino,
         data: DataKamino,
         limits: LimitsKamino | None = None,
@@ -860,7 +839,7 @@ class PADMMSolver:
         Warm-starts the internal solver state from the provided model data and limits and contacts containers.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
                 This is needed during warm-starts in order to access the problem preconditioning.
             model: The model associated with the problem.
             data: The model data associated with the problem.
@@ -891,13 +870,13 @@ class PADMMSolver:
     # Internals - Per-Step Operations
     ###
 
-    def _update_desaxce_correction(self, problem: DualProblem, z: wp.array[wp.float32]):
+    def _update_desaxce_correction(self, problem: ConstrainedDynamicsProblem, z: wp.array[wp.float32]):
         """
         Launches a kernel to compute the De Saxce correction velocity using the previous dual variables.
         The kernel is parallelized over the number of worlds and the maximum number of contacts.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
             z: The dual variable array from the previous iteration.
                 This can either be the acceleration variable `z_hat` or the standard dual variable `z_p`.
         """
@@ -919,13 +898,15 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_velocity_bias(self, problem: DualProblem, y: wp.array[wp.float32], z: wp.array[wp.float32]):
+    def _update_velocity_bias(
+        self, problem: ConstrainedDynamicsProblem, y: wp.array[wp.float32], z: wp.array[wp.float32]
+    ):
         """
         Launches a kernel to compute the total bias velocity vector using the previous state variables.
         The kernel is parallelized over the number of worlds and the maximum number of total constraints.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
             y: The primal variable array from the previous iteration.
                 This can either be the acceleration variable `y_hat` or the standard primal variable `y_p`.
             z: The dual variable array from the previous iteration.
@@ -952,7 +933,9 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_desaxce_and_velocity_bias(self, problem: DualProblem, y: wp.array[wp.float32], z: wp.array[wp.float32]):
+    def _update_desaxce_and_velocity_bias(
+        self, problem: ConstrainedDynamicsProblem, y: wp.array[wp.float32], z: wp.array[wp.float32]
+    ):
         """Fused De Saxce correction + velocity bias in a single kernel launch.
 
         Computes the De Saxce correction inline for contact constraints and the velocity
@@ -963,7 +946,7 @@ class PADMMSolver:
         read the original value.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
             y: The primal variable array from the previous iteration.
             z: The dual variable array from the previous iteration.
         """
@@ -992,21 +975,19 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_unconstrained_solution(self, problem: DualProblem):
+    def _update_unconstrained_solution(self, problem: ConstrainedDynamicsProblem):
         """
-        Launches a kernel to solve the unconstrained sub-problem for the primal variables.
-        For `DualProblem` solves, this corresponds to solving a linear system with the Delassus matrix.
-        The kernel is parallelized over the number of worlds and the maximum number of total constraints.
+        Solves the unconstrained sub-problem for the primal variables using the linear operator of the problem.
+
+        For the dual formulation, this corresponds to solving a linear system with the Delassus matrix,
+        while for the primal formulation, it corresponds to solving with the constraint-augmented mass matrix.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
-        # TODO: We should do this in-place
-        # wp.copy(self._data.state.x, self._data.state.v)
-        # problem._delassus.solve_inplace(x=self._data.state.x)
-        problem._delassus.solve(v=self._data.state.v, x=self._data.state.x)
+        problem.solve(v=self._data.state.v, x=self._data.state.x)
 
-    def _update_projection_argument(self, problem: DualProblem, z: wp.array[wp.float32]):
+    def _update_projection_argument(self, problem: ConstrainedDynamicsProblem, z: wp.array[wp.float32]):
         """
         Launches a kernel to compute the argument for the projection operator onto the
         feasible set using the accelerated state variables and the unconstrained solution.
@@ -1014,7 +995,7 @@ class PADMMSolver:
         The kernel is parallelized over the number of worlds and the maximum number of total constraints.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
             z: The dual variable array from the previous iteration.
                 This can either be the acceleration variable `z_hat` or the standard dual variable `z
         """
@@ -1036,7 +1017,7 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_projection_to_feasible_set(self, problem: DualProblem):
+    def _update_projection_to_feasible_set(self, problem: ConstrainedDynamicsProblem):
         """
         Launches a kernel to project the current primal variables
         onto the feasible set defined by the constraint cone K.
@@ -1045,7 +1026,7 @@ class PADMMSolver:
         number of bounded-multiplier, limit, and contact entities.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Project each bounded, limit, and contact entity onto its feasible set.
         wp.launch(
@@ -1072,13 +1053,13 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_complementarity_residuals(self, problem: DualProblem):
+    def _update_complementarity_residuals(self, problem: ConstrainedDynamicsProblem):
         """
         Launches a kernel to compute the complementarity residuals from the current state variables.
         The kernel is parallelized over the number of worlds and the maximum number of inequality constraints.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Compute complementarity residual from the current state.
         wp.launch(
@@ -1106,7 +1087,7 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_dual_variables_and_residuals(self, problem: DualProblem):
+    def _update_dual_variables_and_residuals(self, problem: ConstrainedDynamicsProblem):
         """
         Launches a kernel to update the dual variables and compute the
         PADMM residuals from the current and previous state variables.
@@ -1114,7 +1095,7 @@ class PADMMSolver:
         The kernel is parallelized over the number of worlds and the maximum number of total constraints.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Update the dual variables and compute primal-dual residuals from the current state
         # NOTE: These are combined into a single kernel to reduce kernel launch overhead
@@ -1148,7 +1129,7 @@ class PADMMSolver:
         # Compute complementarity residual from the current state.
         self._update_complementarity_residuals(problem)
 
-    def _update_projection_dual_convergence_accel(self, problem: DualProblem):
+    def _update_projection_dual_convergence_accel(self, problem: ConstrainedDynamicsProblem):
         """Advance accelerated PADMM projection, residual status, and state cache."""
         tile_size = get_tile_size(self._size.max_of_max_total_cts)
         block_dim = get_block_dim(tile_size, ratio=2, min_size=1)
@@ -1200,7 +1181,7 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_convergence_check(self, problem: DualProblem):
+    def _update_convergence_check(self, problem: ConstrainedDynamicsProblem):
         """
         Launches a kernel to compute the infinity-norm of the PADMM residuals
         using the current and previous state variables and check for convergence.
@@ -1208,7 +1189,7 @@ class PADMMSolver:
         The kernel is parallelized over the number of worlds.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Compute infinity-norm of all residuals and check for convergence
         tile_size = get_tile_size(self._size.max_of_max_total_cts)
@@ -1242,14 +1223,14 @@ class PADMMSolver:
             device=self.device,
         )
 
-    def _update_solver_info(self, problem: DualProblem):
+    def _update_solver_info(self, problem: ConstrainedDynamicsProblem):
         """
         Launches a kernel to update the solver info history from the current solver data.
 
         The kernel is parallelized over the number of worlds.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # First reset the internal buffer arrays to zero
         # to ensure we do not accumulate values across iterations
@@ -1257,148 +1238,73 @@ class PADMMSolver:
         self.data.info.v_aug.zero_()
         self._data.info.s.zero_()
 
+        # Compute the preconditioned post-event constraint-space velocity: v_plus = v_f + P (D + R) P @ lambda
+        wp.copy(self._data.info.v_plus, problem.data.v_f)
+        problem.gemv(x=self._data.state.y, y=self._data.info.v_plus, alpha=1.0, beta=1.0)
+
         # Collect convergence information from the current state
-        if problem.sparse:
-            # Initialize post-event constraint-space velocity from solution: v_plus = v_f + D @ lambda
-            wp.copy(self._data.info.v_plus, problem.data.v_f)
-            delassus_reg_prev = problem.delassus._eta
-            problem.delassus.set_regularization(None)
-            problem.delassus.gemv(
-                x=self._data.state.y,
-                y=self._data.info.v_plus,
-                world_mask=wp.ones((problem.data.num_worlds,), dtype=wp.bool, device=self.device),
-                alpha=1.0,
-                beta=1.0,
-            )
-            problem.delassus.set_regularization(delassus_reg_prev)
-            wp.launch(
-                kernel=self._collect_solver_info_kernel_sparse,
-                dim=self._size.num_worlds,
-                inputs=[
-                    # Inputs:
-                    problem.data.nbc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.bcio,
-                    problem.data.cio,
-                    problem.data.bcgo,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.dim,
-                    problem.data.vio,
-                    problem.data.mu,
-                    problem.data.v_f,
-                    problem.data.P,
-                    problem.data.bound_lower,
-                    problem.data.bound_upper,
-                    self._data.state.s,
-                    self._data.state.x,
-                    self._data.state.x_p,
-                    self._data.state.y,
-                    self._data.state.y_p,
-                    self._data.state.z,
-                    self._data.state.z_p,
-                    self._data.state.a,
-                    self._data.penalty,
-                    self._data.status,
-                    # Outputs:
-                    self._data.info.lambdas,
-                    self._data.info.v_plus,
-                    self._data.info.v_aug,
-                    self._data.info.s,
-                    self._data.info.offsets,
-                    self._data.info.num_restarts,
-                    self._data.info.num_rho_updates,
-                    self._data.info.a,
-                    self._data.info.norm_s,
-                    self._data.info.norm_x,
-                    self._data.info.norm_y,
-                    self._data.info.norm_z,
-                    self._data.info.f_ccp,
-                    self._data.info.f_ncp,
-                    self._data.info.r_dx,
-                    self._data.info.r_dy,
-                    self._data.info.r_dz,
-                    self._data.info.r_primal,
-                    self._data.info.r_dual,
-                    self._data.info.r_compl,
-                    self._data.info.r_pd,
-                    self._data.info.r_dp,
-                    self._data.info.r_comb,
-                    self._data.info.r_comb_ratio,
-                    self._data.info.r_ncp_primal,
-                    self._data.info.r_ncp_dual,
-                    self._data.info.r_ncp_compl,
-                    self._data.info.r_ncp_natmap,
-                ],
-                device=self.device,
-            )
-        else:
-            wp.launch(
-                kernel=self._collect_solver_info_kernel,
-                dim=self._size.num_worlds,
-                inputs=[
-                    # Inputs:
-                    problem.data.nbc,
-                    problem.data.nl,
-                    problem.data.nc,
-                    problem.data.bcio,
-                    problem.data.cio,
-                    problem.data.bcgo,
-                    problem.data.lcgo,
-                    problem.data.ccgo,
-                    problem.data.dim,
-                    problem.data.vio,
-                    problem.data.mio,
-                    problem.data.mu,
-                    problem.data.v_f,
-                    problem.data.D,
-                    problem.data.P,
-                    problem.data.bound_lower,
-                    problem.data.bound_upper,
-                    self._data.state.sigma,
-                    self._data.state.s,
-                    self._data.state.x,
-                    self._data.state.x_p,
-                    self._data.state.y,
-                    self._data.state.y_p,
-                    self._data.state.z,
-                    self._data.state.z_p,
-                    self._data.state.a,
-                    self._data.penalty,
-                    self._data.status,
-                    # Outputs:
-                    self._data.info.lambdas,
-                    self._data.info.v_plus,
-                    self._data.info.v_aug,
-                    self._data.info.s,
-                    self._data.info.offsets,
-                    self._data.info.num_restarts,
-                    self._data.info.num_rho_updates,
-                    self._data.info.a,
-                    self._data.info.norm_s,
-                    self._data.info.norm_x,
-                    self._data.info.norm_y,
-                    self._data.info.norm_z,
-                    self._data.info.f_ccp,
-                    self._data.info.f_ncp,
-                    self._data.info.r_dx,
-                    self._data.info.r_dy,
-                    self._data.info.r_dz,
-                    self._data.info.r_primal,
-                    self._data.info.r_dual,
-                    self._data.info.r_compl,
-                    self._data.info.r_pd,
-                    self._data.info.r_dp,
-                    self._data.info.r_comb,
-                    self._data.info.r_comb_ratio,
-                    self._data.info.r_ncp_primal,
-                    self._data.info.r_ncp_dual,
-                    self._data.info.r_ncp_compl,
-                    self._data.info.r_ncp_natmap,
-                ],
-                device=self.device,
-            )
+        wp.launch(
+            kernel=self._collect_solver_info_kernel,
+            dim=self._size.num_worlds,
+            inputs=[
+                # Inputs:
+                problem.data.nbc,
+                problem.data.nl,
+                problem.data.nc,
+                problem.data.bcio,
+                problem.data.cio,
+                problem.data.bcgo,
+                problem.data.lcgo,
+                problem.data.ccgo,
+                problem.data.dim,
+                problem.data.vio,
+                problem.data.mu,
+                problem.data.v_f,
+                problem.data.P,
+                problem.data.bound_lower,
+                problem.data.bound_upper,
+                self._data.state.s,
+                self._data.state.x,
+                self._data.state.x_p,
+                self._data.state.y,
+                self._data.state.y_p,
+                self._data.state.z,
+                self._data.state.z_p,
+                self._data.state.a,
+                self._data.penalty,
+                self._data.status,
+                # Outputs:
+                self._data.info.lambdas,
+                self._data.info.v_plus,
+                self._data.info.v_aug,
+                self._data.info.s,
+                self._data.info.offsets,
+                self._data.info.num_restarts,
+                self._data.info.num_rho_updates,
+                self._data.info.a,
+                self._data.info.norm_s,
+                self._data.info.norm_x,
+                self._data.info.norm_y,
+                self._data.info.norm_z,
+                self._data.info.f_ccp,
+                self._data.info.f_ncp,
+                self._data.info.r_dx,
+                self._data.info.r_dy,
+                self._data.info.r_dz,
+                self._data.info.r_primal,
+                self._data.info.r_dual,
+                self._data.info.r_compl,
+                self._data.info.r_pd,
+                self._data.info.r_dp,
+                self._data.info.r_comb,
+                self._data.info.r_comb_ratio,
+                self._data.info.r_ncp_primal,
+                self._data.info.r_ncp_dual,
+                self._data.info.r_ncp_compl,
+                self._data.info.r_ncp_natmap,
+            ],
+            device=self.device,
+        )
 
     def _update_previous_state(self):
         """
@@ -1413,13 +1319,13 @@ class PADMMSolver:
     # Internals - Post-Solve Operations
     ###
 
-    def _update_solution(self, problem: DualProblem):
+    def _update_solution(self, problem: ConstrainedDynamicsProblem):
         """
         Launches a set of kernels to extract and post-process
         the final solution from the internal PADMM state data.
 
         Args:
-            problem: The dual forward dynamics problem to be solved.
+            problem: The forward dynamics problem to be solved.
         """
         # Apply the dual preconditioner to recover the final PADMM state
         wp.launch(

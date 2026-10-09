@@ -18,7 +18,6 @@ __all__ = [
     "compute_desaxce_corrections",
     "compute_dot_product",
     "compute_double_dot_product",
-    "compute_gemv",
     "compute_inf_norm",
     "compute_inverse_preconditioned_iterate_residual",
     "compute_l1_norm",
@@ -296,49 +295,6 @@ def compute_cwise_vec_div(
     for i in range(dim):
         v_i = vio + i
         y[v_i] = a[v_i] / x[v_i]
-
-
-@wp.func
-def compute_gemv(
-    dim: wp.int32,
-    vio: wp.int32,
-    mio: wp.int32,
-    sigma: wp.float32,
-    P: wp.array[wp.float32],
-    A: wp.array[wp.float32],
-    x: wp.array[wp.float32],
-    b: wp.array[wp.float32],
-    c: wp.array[wp.float32],
-):
-    """
-    Computes the generalized matrix-vector product `c =  b + (A - sigma * I_n)@ x`.
-
-    The matrix `A` is stored using row-major order in flat array with allocation size `maxdim x maxdim`,
-    starting from the matrix index offset `mio`. The active dimensions of the matrix are `dim x dim`,
-    where `dim` is the number of rows and columns. The vectors `x, b, c` are stored in flat arrays with
-    dimensions `dim`, starting from the vector index offset `vio`.
-
-    Args:
-        maxdim: The maximum dimension of the matrix `A`.
-        dim: The active dimension of the matrix `A` and the vectors `x, b, c`.
-        vio: The vector index offset (i.e. start index) for the vectors `x, b, c`.
-        mio: The matrix index offset (i.e. start index) for the matrix `A`.
-        A: Input matrix `A` stored in row-major order.
-        x: Input array `x` to be multiplied with the matrix `A`.
-        b: Input array `b` to be added to the product `A @ x`.
-        c: Output array `c` where the result of the operation is stored.
-    """
-    b_i = float(0.0)
-    x_j = float(0.0)
-    for i in range(dim):
-        v_i = vio + i
-        m_i = mio + dim * i
-        b_i = b[v_i]
-        for j in range(dim):
-            x_j = x[vio + j]
-            b_i += A[m_i + j] * x_j
-        b_i -= sigma * x[v_i]
-        c[v_i] = (1.0 / P[v_i]) * b_i
 
 
 @wp.func
