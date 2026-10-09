@@ -313,68 +313,6 @@ def _build_delassus_elementwise_sparse(
 
 
 @wp.kernel
-def _add_joint_armature_diagonal_regularization_dense(
-    # Inputs:
-    model_info_num_joint_dynamic_cts: wp.array[wp.int32],
-    model_info_joint_dynamic_cts_offset: wp.array[wp.int32],
-    model_joint_inv_m_j: wp.array[wp.float32],
-    delassus_dim: wp.array[wp.int32],
-    delassus_mio: wp.array[wp.int32],
-    # Outputs:
-    delassus_D: wp.array[wp.float32],
-):
-    # Retrieve the thread index as the world index and Delassus element index
-    wid, tid = wp.tid()
-
-    # Retrieve the world dimensions
-    num_joint_dyn_cts = model_info_num_joint_dynamic_cts[wid]
-
-    # Skip if world has no dynamic joint constraints or indices exceed the problem size
-    if num_joint_dyn_cts == 0 or tid >= num_joint_dyn_cts:
-        return
-
-    # Retrieve the world's Delassus matrix dimension and offset
-    ncts = delassus_dim[wid]
-    dmio = delassus_mio[wid]
-
-    # Retrieve the dynamic constraint index offset of the world
-    world_joint_dynamic_cts_offset = model_info_joint_dynamic_cts_offset[wid]
-
-    # Retrieve the joint's inverse mass for armature regularization
-    inv_m_j = model_joint_inv_m_j[world_joint_dynamic_cts_offset + tid]
-
-    # Add the armature regularization to the diagonal element of the Delassus matrix
-    delassus_D[dmio + ncts * tid + tid] += inv_m_j
-
-
-@wp.kernel
-def _add_joint_effort_diagonal_regularization_dense(
-    # Inputs:
-    model_info_num_effort_cts: wp.array[wp.int32],
-    model_info_joint_effort_cts_offset: wp.array[wp.int32],
-    model_info_bounded_cts_group_offset: wp.array[wp.int32],
-    model_info_num_friction_cts: wp.array[wp.int32],
-    model_joint_inv_m_a: wp.array[wp.float32],
-    delassus_dim: wp.array[wp.int32],
-    delassus_mio: wp.array[wp.int32],
-    # Outputs:
-    delassus_D: wp.array[wp.float32],
-):
-    wid, tid = wp.tid()
-
-    num_effort_cts = model_info_num_effort_cts[wid]
-    if num_effort_cts == 0 or tid >= num_effort_cts:
-        return
-
-    ncts = delassus_dim[wid]
-    dmio = delassus_mio[wid]
-    world_effort_cts_offset = model_info_joint_effort_cts_offset[wid]
-    row = model_info_bounded_cts_group_offset[wid] + model_info_num_friction_cts[wid] + tid
-    inv_m_a = model_joint_inv_m_a[world_effort_cts_offset + tid]
-    delassus_D[dmio + ncts * row + row] += inv_m_a
-
-
-@wp.kernel
 def _regularize_delassus_diagonal_dense(
     # Inputs:
     delassus_dim: wp.array[wp.int32],
@@ -505,125 +443,56 @@ def _make_merge_preconditioner_kernel(block_type: BlockDType):
 
 
 @wp.kernel
-def _add_armature_regularization_sparse(
+def _build_combined_regularization_sparse(
     # Inputs:
-    model_info_num_joint_dynamic_cts: wp.array[wp.int32],
-    model_info_joint_dynamic_cts_offset: wp.array[wp.int32],
-    row_start: wp.array[wp.int32],
-    model_joint_inv_m_j: wp.array[wp.float32],
-    # Outputs:
-    combined_regularization: wp.array[wp.float32],
-):
-    # Retrieve the thread index as the world index and joint dynamics index
-    wid, tid = wp.tid()
-
-    # Retrieve the world dimensions
-    num_joint_dyn_cts = model_info_num_joint_dynamic_cts[wid]
-
-    # Skip if world has no dynamic joint constraints or indices exceed the problem size
-    if num_joint_dyn_cts == 0 or tid >= num_joint_dyn_cts:
-        return
-
-    # Retrieve the dynamic constraint index offset of the world
-    world_joint_dynamic_cts_offset = model_info_joint_dynamic_cts_offset[wid]
-
-    # Retrieve the joint's inverse mass for armature regularization
-    inv_m_j = model_joint_inv_m_j[world_joint_dynamic_cts_offset + tid]
-
-    # Get the index into the regularization
-    vec_id = row_start[wid] + tid
-
-    # Add the armature regularization
-    combined_regularization[vec_id] += inv_m_j
-
-
-@wp.kernel
-def _add_effort_regularization_sparse(
-    # Inputs:
-    model_info_num_effort_cts: wp.array[wp.int32],
-    model_info_joint_effort_cts_offset: wp.array[wp.int32],
-    model_info_bounded_cts_group_offset: wp.array[wp.int32],
-    model_info_num_friction_cts: wp.array[wp.int32],
-    row_start: wp.array[wp.int32],
-    model_joint_inv_m_a: wp.array[wp.float32],
-    # Outputs:
-    combined_regularization: wp.array[wp.float32],
-):
-    wid, tid = wp.tid()
-
-    num_effort_cts = model_info_num_effort_cts[wid]
-    if num_effort_cts == 0 or tid >= num_effort_cts:
-        return
-
-    world_effort_cts_offset = model_info_joint_effort_cts_offset[wid]
-    inv_m_a = model_joint_inv_m_a[world_effort_cts_offset + tid]
-    row = model_info_bounded_cts_group_offset[wid] + model_info_num_friction_cts[wid] + tid
-    vec_id = row_start[wid] + row
-    combined_regularization[vec_id] += inv_m_a
-
-
-@wp.kernel
-def _add_armature_regularization_preconditioned_sparse(
-    # Inputs:
-    model_info_num_joint_dynamic_cts: wp.array[wp.int32],
-    model_info_joint_dynamic_cts_offset: wp.array[wp.int32],
-    model_joint_inv_m_j: wp.array[wp.float32],
-    row_start: wp.array[wp.int32],
+    eta: wp.array[wp.float32],
     preconditioner: wp.array[wp.float32],
+    compliance: wp.array[wp.float32],
     # Outputs:
     combined_regularization: wp.array[wp.float32],
 ):
-    # Retrieve the thread index as the world index and joint dynamics index
-    wid, tid = wp.tid()
+    """
+    Combines the diagonal regularization and compliance into a single diagonal term of the
+    (optionally preconditioned) operator, i.e. ``eta + P @ P @ R``, where ``eta`` and ``P``
+    are omitted if not set (i.e. null arrays).
+    """
+    # Retrieve the thread index as the constraint-space vector index
+    vec_id = wp.tid()
 
-    # Retrieve the world dimensions
-    num_joint_dyn_cts = model_info_num_joint_dynamic_cts[wid]
+    # Since the compliance is applied to the original Delassus matrix, it must be
+    # scaled by the square of the preconditioner if the latter is present.
+    r_k = compliance[vec_id]
+    if preconditioner:
+        p_k = preconditioner[vec_id]
+        r_k *= p_k * p_k
 
-    # Skip if world has no dynamic joint constraints or indices exceed the problem size
-    if num_joint_dyn_cts == 0 or tid >= num_joint_dyn_cts:
-        return
+    # Add the regularization if present
+    if eta:
+        r_k += eta[vec_id]
 
-    # Retrieve the dynamic constraint index offset of the world
-    world_joint_dynamic_cts_offset = model_info_joint_dynamic_cts_offset[wid]
-
-    # Retrieve the joint's inverse mass for armature regularization
-    inv_m_j = model_joint_inv_m_j[world_joint_dynamic_cts_offset + tid]
-
-    # Get the index into the preconditioner and regularization
-    vec_id = row_start[wid] + tid
-
-    # Retrieve preconditioner value
-    p = preconditioner[vec_id]
-
-    # Add the armature regularization
-    combined_regularization[vec_id] += p * p * inv_m_j
+    # Store the combined regularization
+    combined_regularization[vec_id] = r_k
 
 
 @wp.kernel
-def _add_effort_regularization_preconditioned_sparse(
+def _add_compliance_to_diagonal_sparse(
     # Inputs:
-    model_info_num_effort_cts: wp.array[wp.int32],
-    model_info_joint_effort_cts_offset: wp.array[wp.int32],
-    model_info_bounded_cts_group_offset: wp.array[wp.int32],
-    model_info_num_friction_cts: wp.array[wp.int32],
-    model_joint_inv_m_a: wp.array[wp.float32],
-    row_start: wp.array[wp.int32],
-    preconditioner: wp.array[wp.float32],
+    delassus_dim: wp.array[wp.int32],
+    delassus_vio: wp.array[wp.int32],
+    compliance: wp.array[wp.float32],
     # Outputs:
-    combined_regularization: wp.array[wp.float32],
+    diag: wp.array[wp.float32],
 ):
+    # Retrieve the thread index as the world index and constraint index
     wid, tid = wp.tid()
 
-    num_effort_cts = model_info_num_effort_cts[wid]
-    if num_effort_cts == 0 or tid >= num_effort_cts:
+    # Skip if row index exceed the problem size
+    if tid >= delassus_dim[wid]:
         return
 
-    world_effort_cts_offset = model_info_joint_effort_cts_offset[wid]
-    inv_m_a = model_joint_inv_m_a[world_effort_cts_offset + tid]
-    row = model_info_bounded_cts_group_offset[wid] + model_info_num_friction_cts[wid] + tid
-    vec_id = row_start[wid] + row
-    p = preconditioner[vec_id]
-    combined_regularization[vec_id] += p * p * inv_m_a
+    # Add the compliance to the diagonal element
+    vec_id = delassus_vio[wid] + tid
+    diag[vec_id] += compliance[vec_id]
 
 
 @wp.kernel
@@ -809,6 +678,9 @@ def _make_block_sparse_gemv_regularization_kernel(alpha: wp.float32):
 class DelassusOperator:
     """
     A container to represent the Delassus matrix operator.
+
+    The Delassus matrix is stored explicitly as ``D = J @ M^-1 @ J^T + diag(R)``, where the
+    optional diagonal constraint compliance ``R`` is added when the matrix is built.
     """
 
     def __init__(
@@ -819,6 +691,8 @@ class DelassusOperator:
         contacts: ContactsKamino | None = None,
         solver: LinearSolverType = None,
         solver_kwargs: dict[str, Any] | None = None,
+        *,
+        compliance: wp.array[wp.float32] | None = None,
     ):
         """
         Creates a Delassus operator for the given model, limits and contacts containers.
@@ -839,6 +713,8 @@ class DelassusOperator:
             contacts: The container holding the allocated contacts data.
             solver: The solver type to use for linear systems defined by the Delassus operator.
             solver_kwargs: Additional keyword arguments to pass to the solver constructor.
+            compliance: The optional diagonal constraint compliance to add to the Delassus matrix.
+                See :meth:`set_compliance` for details.
         """
         # Declare and initialize the host-side cache of the necessary memory allocations
         self._num_worlds: int = 0
@@ -860,6 +736,9 @@ class DelassusOperator:
         # Declare the optional Cholesky factorization
         self._solver: LinearSolverType | None = None
 
+        # Declare the optional diagonal constraint compliance
+        self._compliance: wp.array[wp.float32] | None = None
+
         # Allocate the Delassus operator data if at least the model is provided
         if model is not None:
             self.finalize(
@@ -869,6 +748,7 @@ class DelassusOperator:
                 contacts=contacts,
                 solver=solver,
                 solver_kwargs=solver_kwargs,
+                compliance=compliance,
             )
 
     @property
@@ -924,6 +804,13 @@ class DelassusOperator:
         """
         return self._operator.mat
 
+    @property
+    def compliance(self) -> wp.array[wp.float32] | None:
+        """
+        Returns the diagonal constraint compliance added to the Delassus matrix, if any.
+        """
+        return self._compliance
+
     def finalize(
         self,
         model: ModelKamino,
@@ -932,6 +819,8 @@ class DelassusOperator:
         contacts: ContactsKamino | None = None,
         solver: LinearSolverType = None,
         solver_kwargs: dict[str, Any] | None = None,
+        *,
+        compliance: wp.array[wp.float32] | None = None,
     ):
         """
         Allocates the Delassus operator with the specified dimensions.
@@ -943,6 +832,8 @@ class DelassusOperator:
             contacts: The container holding the allocated contacts data.
             solver: The solver type to use for linear systems defined by the Delassus operator.
             solver_kwargs: Additional keyword arguments to pass to the solver constructor.
+            compliance: The optional diagonal constraint compliance to add to the Delassus matrix.
+                See :meth:`set_compliance` for details.
         """
 
         # Ensure the model container is valid
@@ -1012,6 +903,24 @@ class DelassusOperator:
             solver_kwargs = solver_kwargs or {}
             self._solver = solver(operator=self._operator, device=self._device, **solver_kwargs)
 
+        # Capture the optional diagonal constraint compliance
+        self.set_compliance(compliance)
+
+    def set_compliance(self, compliance: wp.array[wp.float32] | None):
+        """
+        Sets the diagonal constraint compliance to add to the Delassus matrix, replacing any previously set compliance.
+
+        The compliance is added to the diagonal of each matrix block by :meth:`build`, i.e. the
+        built matrix is ``D = J @ M^-1 @ J^T + diag(R)``. The array is referenced, so its current
+        values are used each time the matrix is built.
+
+        Args:
+            compliance: The diagonal constraint compliance values in physical (i.e. unpreconditioned)
+                coordinates, with each value corresponding to a constraint, or `None` to disable compliance.
+                Shape of ``(sum_of_max_total_cts,)``.
+        """
+        self._compliance = compliance
+
     def zero(self):
         """
         Sets all values of the Delassus matrix to zero.
@@ -1028,6 +937,8 @@ class DelassusOperator:
     ):
         """
         Builds the Delassus matrix using the provided ModelKamino, DataKamino, and constraint Jacobians.
+
+        If a compliance is set (see :meth:`set_compliance`), it is added to the diagonal of the Delassus matrix.
 
         Args:
             model: The model for which the Delassus operator is built.
@@ -1115,39 +1026,9 @@ class DelassusOperator:
                 device=self._device,
             )
 
-        # Add armature regularization to the upper diagonal if dynamic joint constraints are present
-        if model.size.sum_of_num_dynamic_joints > 0:
-            wp.launch(
-                kernel=_add_joint_armature_diagonal_regularization_dense,
-                dim=(self._size.num_worlds, model.size.max_of_num_dynamic_joint_cts),
-                inputs=[
-                    # Inputs:
-                    model.info.num_joint_dynamic_cts,
-                    model.info.joint_dynamic_cts_offset,
-                    data.joints.inv_m_j,
-                    self._operator.info.dim,
-                    self._operator.info.mio,
-                    # Outputs:
-                    self._operator.mat,
-                ],
-                device=self._device,
-            )
-        if model.size.sum_of_num_effort_joint_cts > 0:
-            wp.launch(
-                kernel=_add_joint_effort_diagonal_regularization_dense,
-                dim=(self._size.num_worlds, model.size.max_of_num_effort_joint_cts),
-                inputs=[
-                    model.info.num_joint_effort_cts,
-                    model.info.joint_effort_cts_offset,
-                    model.info.joint_bounded_cts_group_offset,
-                    model.info.num_joint_friction_cts,
-                    data.joints.inv_m_a,
-                    self._operator.info.dim,
-                    self._operator.info.mio,
-                    self._operator.mat,
-                ],
-                device=self._device,
-            )
+        # Add the optional constraint compliance to the diagonal
+        if self._compliance is not None:
+            self.regularize(eta=self._compliance)
 
     def regularize(self, eta: wp.array[wp.float32]):
         """
@@ -1247,11 +1128,11 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
     compute matrix-vector products with the Delassus matrix, not solve linear systems.
 
     The Delassus operator D is implicitly defined as D = J @ M^-1 @ J^T, where J is the constraint
-    Jacobian and M is the mass matrix. It supports diagonal regularization and diagonal
-    preconditioning.
+    Jacobian and M is the mass matrix. It supports diagonal constraint compliance, diagonal
+    regularization and diagonal preconditioning.
 
-    For a given diagonal regularization matrix R and a diagonal preconditioning matrix P, the
-    final operator is defined by the matrix P @ D @ P + R.
+    For a given diagonal compliance matrix R, diagonal regularization matrix diag(eta) and diagonal
+    preconditioning matrix P, the final operator is defined by the matrix P @ (D + R) @ P + diag(eta).
 
     Typical usage example:
 
@@ -1300,6 +1181,8 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         jacobians: SparseSystemJacobians | None = None,
         solver: LinearSolverType = None,
         solver_kwargs: dict[str, Any] | None = None,
+        *,
+        compliance: wp.array[wp.float32] | None = None,
     ):
         """
         Creates a Delassus operator for the given model.
@@ -1322,6 +1205,8 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             solver: The solver type to use for linear systems defined by the Delassus operator.
                 Must be a subclass of `IterativeSolver`.
             solver_kwargs: Additional keyword arguments to pass to the solver constructor.
+            compliance: The optional diagonal constraint compliance of the Delassus operator.
+                See :meth:`set_compliance` for details.
         """
         super().__init__()
 
@@ -1332,6 +1217,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         self._contacts: ContactsKamino | None = None
         self._preconditioner: wp.array[wp.float32] | None = None
         self._eta: wp.array[wp.float32] | None = None
+        self._compliance: wp.array[wp.float32] | None = None
 
         self._jacobians: SparseSystemJacobians | None = None
 
@@ -1369,7 +1255,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         self._col_major_jacobian: ColMajorSparseConstraintJacobians | None = None
         self._transpose_op_matrix: BlockSparseMatrices[wp.float32, wp.int32, Any] | None = None
 
-        # Combined regularization vector for implicit joint dynamics
+        # Combined diagonal regularization and (preconditioned) compliance, only allocated if a compliance is set
         self._combined_regularization: wp.array[wp.float32] | None = None
 
         # Allocate the Delassus operator data if at least the model is provided
@@ -1382,6 +1268,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
                 jacobians=jacobians,
                 solver=solver,
                 solver_kwargs=solver_kwargs,
+                compliance=compliance,
             )
 
     def finalize(
@@ -1393,6 +1280,8 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         contacts: ContactsKamino | None,
         solver: LinearSolverType = None,
         solver_kwargs: dict[str, Any] | None = None,
+        *,
+        compliance: wp.array[wp.float32] | None = None,
     ):
         """
         Allocates the Delassus operator with the specified dimensions and device.
@@ -1406,6 +1295,8 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             solver: The solver type to use for linear systems defined by the Delassus operator.
                 Must be a subclass of `IterativeSolver`.
             solver_kwargs: Additional keyword arguments to pass to the solver constructor.
+            compliance: The optional diagonal constraint compliance of the Delassus operator.
+                See :meth:`set_compliance` for details.
         """
         # Ensure the model container is valid
         if model is None:
@@ -1465,11 +1356,8 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             (self._model.size.sum_of_num_body_dofs,), dtype=wp.float32, device=self._device
         )
 
-        # Initialize memory for combined regularization, if necessary
-        if self._model.size.max_of_num_dynamic_joint_cts > 0 or self._model.size.max_of_num_effort_joint_cts > 0:
-            self._combined_regularization = wp.empty(
-                (self._model.size.sum_of_max_total_cts,), dtype=wp.float32, device=self._device
-            )
+        # Capture the optional constraint compliance and allocate the combined regularization if necessary
+        self.set_compliance(compliance)
 
         # Assign Jacobian
         self._jacobians = jacobians
@@ -1604,89 +1492,55 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
                 device=self._transpose_op_matrix.device,
             )
 
-        # Update combined regularization term, which includes the regular regularization (eta) as
-        # well as the terms of the armature regularization. Since the armature regularization is
-        # applied to the original Delassus matrix, preconditioning has to be applied to it if
-        # present.
-        if self._combined_regularization is not None:
-            # Set the combined regularization to the regular regularization if present, otherwise
-            # initialize to zero.
-            if self._eta is not None:
-                wp.copy(self._combined_regularization, self._eta)
-            else:
-                self._combined_regularization.zero_()
-
-            if self._preconditioner is None:
-                # If there is no preconditioner, we add the armature regularization directly to the
-                # combined regularization term.
-                if self._model.size.sum_of_num_dynamic_joint_cts > 0:
-                    wp.launch(
-                        kernel=_add_armature_regularization_sparse,
-                        dim=(self.num_matrices, self._model.size.max_of_num_dynamic_joint_cts),
-                        inputs=[
-                            # Inputs:
-                            self._model.info.num_joint_dynamic_cts,
-                            self._model.info.joint_dynamic_cts_offset,
-                            self.bsm.row_start,
-                            self._data.joints.inv_m_j,
-                            # Outputs:
-                            self._combined_regularization,
-                        ],
-                        device=self._device,
-                    )
-                if self._model.size.sum_of_num_effort_joint_cts > 0:
-                    wp.launch(
-                        kernel=_add_effort_regularization_sparse,
-                        dim=(self.num_matrices, self._model.size.max_of_num_effort_joint_cts),
-                        inputs=[
-                            self._model.info.num_joint_effort_cts,
-                            self._model.info.joint_effort_cts_offset,
-                            self._model.info.joint_bounded_cts_group_offset,
-                            self._model.info.num_joint_friction_cts,
-                            self.bsm.row_start,
-                            self._data.joints.inv_m_a,
-                            self._combined_regularization,
-                        ],
-                        device=self._device,
-                    )
-            else:
-                # If there is a preconditioner, we need to scale the armature regularization with
-                # the preconditioner terms (the square of the preconditioner, to be exact) before
-                # adding it to the combined regularization term.
-                if self._model.size.sum_of_num_dynamic_joint_cts > 0:
-                    wp.launch(
-                        kernel=_add_armature_regularization_preconditioned_sparse,
-                        dim=(self.num_matrices, self._model.size.max_of_num_dynamic_joint_cts),
-                        inputs=[
-                            # Inputs:
-                            self._model.info.num_joint_dynamic_cts,
-                            self._model.info.joint_dynamic_cts_offset,
-                            self._data.joints.inv_m_j,
-                            self.bsm.row_start,
-                            self._preconditioner,
-                            # Outputs:
-                            self._combined_regularization,
-                        ],
-                        device=self._device,
-                    )
-                if self._model.size.sum_of_num_effort_joint_cts > 0:
-                    wp.launch(
-                        kernel=_add_effort_regularization_preconditioned_sparse,
-                        dim=(self.num_matrices, self._model.size.max_of_num_effort_joint_cts),
-                        inputs=[
-                            self._model.info.num_joint_effort_cts,
-                            self._model.info.joint_effort_cts_offset,
-                            self._model.info.joint_bounded_cts_group_offset,
-                            self._model.info.num_joint_friction_cts,
-                            self._data.joints.inv_m_a,
-                            self.bsm.row_start,
-                            self._preconditioner,
-                            self._combined_regularization,
-                        ],
-                        device=self._device,
-                    )
+        # Update the combined regularization term from the current regularization and compliance
+        self._update_combined_regularization()
 
         self._needs_update = False
+
+    def _update_combined_regularization(self):
+        """
+        Updates the combined diagonal term ``diag(eta) + P @ R @ P`` of the operator from the current
+        regularization, compliance and preconditioner, if a compliance is set.
+
+        This is a no-op if no compliance is set, in which case only the regularization is applied.
+        """
+        if self._combined_regularization is None:
+            return
+        wp.launch(
+            kernel=_build_combined_regularization_sparse,
+            dim=self._model.size.sum_of_max_total_cts,
+            inputs=[
+                # Inputs:
+                self._eta,
+                self._preconditioner,
+                self._compliance,
+                # Outputs:
+                self._combined_regularization,
+            ],
+            device=self._device,
+        )
+
+    def set_compliance(self, compliance: wp.array[wp.float32] | None):
+        """
+        Sets the diagonal constraint compliance of the Delassus operator, replacing any previously set compliance.
+
+        With compliance, the effective operator becomes P @ (D + R) @ P + diag(eta), where R = diag(compliance).
+        The array is referenced, so its current values are used on every update of the operator.
+
+        Args:
+            compliance: The diagonal constraint compliance values in physical (i.e. unpreconditioned)
+                coordinates, with each value corresponding to a constraint, or `None` to disable compliance.
+                Shape of ``(sum_of_max_total_cts,)``.
+        """
+        self._compliance = compliance
+        if compliance is None:
+            self._combined_regularization = None
+        elif self._combined_regularization is None:
+            self._combined_regularization = wp.zeros_like(compliance)
+        # Flag required update for solvers that use preconditioned Jacobians
+        self._needs_update = True
+        # Flag sparsity-preserving update for solvers that use raw Jacobians
+        self._regularization_needs_update = True
 
     def set_regularization(self, eta: wp.array[wp.float32] | None):
         """
@@ -1727,9 +1581,9 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         """Stores the diagonal of the Delassus matrix in the given array.
 
         Note:
-            Returns the diagonal of the pure Delassus matrix. Armature and
-            effort-compliance diagonal terms are included; proximal
-            regularization (``eta``) and preconditioning are not.
+            Returns the diagonal of the compliant Delassus matrix ``D + R``, i.e. the constraint
+            compliance is included (if set), while the proximal regularization (``eta``) and
+            preconditioning are not.
 
         Args:
             diag: Output vector for the Delassus matrix diagonal entries.
@@ -1761,33 +1615,17 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
             device=self._device,
         )
 
-        # Add armature and effort regularization
-        if self._model.size.sum_of_num_dynamic_joint_cts > 0:
+        # Add the optional constraint compliance
+        if self._compliance is not None:
             wp.launch(
-                kernel=_add_armature_regularization_sparse,
-                dim=(self.num_matrices, self._model.size.max_of_num_dynamic_joint_cts),
+                kernel=_add_compliance_to_diagonal_sparse,
+                dim=(self.num_matrices, self._model.size.max_of_max_total_cts),
                 inputs=[
                     # Inputs:
-                    self._model.info.num_joint_dynamic_cts,
-                    self._model.info.joint_dynamic_cts_offset,
-                    self.constraint_jacobian.row_start,
-                    self._data.joints.inv_m_j,
+                    self._info.dim,
+                    self._info.vio,
+                    self._compliance,
                     # Outputs:
-                    diag,
-                ],
-                device=self._device,
-            )
-        if self._model.size.sum_of_num_effort_joint_cts > 0:
-            wp.launch(
-                kernel=_add_effort_regularization_sparse,
-                dim=(self.num_matrices, self._model.size.max_of_num_effort_joint_cts),
-                inputs=[
-                    self._model.info.num_joint_effort_cts,
-                    self._model.info.joint_effort_cts_offset,
-                    self._model.info.joint_bounded_cts_group_offset,
-                    self._model.info.num_joint_friction_cts,
-                    self.constraint_jacobian.row_start,
-                    self._data.joints.inv_m_a,
                     diag,
                 ],
                 device=self._device,
@@ -1940,13 +1778,18 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
 
     @property
     def regularization(self) -> wp.array[wp.float32]:
-        """Active diagonal regularization used by sparse matrix-vector products."""
+        """Active diagonal regularization (including any compliance) used by sparse matrix-vector products."""
         regularization = self._combined_regularization
         if regularization is None:
             regularization = self._eta
         if regularization is None:
             raise RuntimeError("Sparse Delassus regularization has not been configured.")
         return regularization
+
+    @property
+    def compliance(self) -> wp.array[wp.float32] | None:
+        """The diagonal constraint compliance of the Delassus operator, if any."""
+        return self._compliance
 
     ###
     # Operations

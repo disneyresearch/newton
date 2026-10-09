@@ -122,6 +122,7 @@ def assert_solver_config(testcase: unittest.TestCase, config: SolverKaminoImpl.C
     testcase.assertIsInstance(config, SolverKaminoImpl.Config)
     testcase.assertIsInstance(config.constraints, kamino_config.ConstraintStabilizationConfig)
     testcase.assertIsInstance(config.dynamics, kamino_config.ConstrainedDynamicsConfig)
+    testcase.assertIsInstance(config.compliance, kamino_config.ConstraintComplianceConfig)
     testcase.assertIsInstance(config.padmm, kamino_config.PADMMSolverConfig)
     testcase.assertIsInstance(config.rotation_correction, str)
 
@@ -400,12 +401,14 @@ class TestSolverKaminoConfig(unittest.TestCase):
         """Construct an explicit solver configuration with requested overrides."""
         config = SolverKaminoImpl.Config(
             dynamics=kamino_config.ConstrainedDynamicsConfig(linear_solver_type="CR"),
+            compliance=kamino_config.ConstraintComplianceConfig(contacts_normal=1e-3),
             padmm=kamino_config.PADMMSolverConfig(warmstart_mode="internal", warmstart_scale=0.5),
             rotation_correction="continuous",
         )
         assert_solver_config(self, config)
         self.assertEqual(config.rotation_correction, "continuous")
         self.assertEqual(config.dynamics.linear_solver_type, "CR")
+        self.assertEqual(config.compliance.contacts_normal, 1e-3)
         self.assertEqual(config.padmm.warmstart_mode, "internal")
         self.assertEqual(config.padmm.warmstart_scale, 0.5)
 

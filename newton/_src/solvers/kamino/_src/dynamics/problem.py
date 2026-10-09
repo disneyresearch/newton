@@ -59,6 +59,7 @@ __all__ = [
     "ConstrainedDynamicsProblem",
     "ConstrainedDynamicsProblemData",
     "SystemJacobiansType",
+    "build_constraint_compliance",
 ]
 
 
@@ -319,7 +320,11 @@ class ConstrainedDynamicsProblemData:
     """
     The flat array of diagonal constraint compliance blocks, in physical (i.e. unpreconditioned) coordinates.
 
-    This is `None` if all constraints of all worlds are rigid, i.e. the compliance is zero.
+    Built by :func:`build_constraint_compliance` from the per-world compliance configurations and the
+    implicit joint dynamics of dynamic and effort-limited joint constraints.
+
+    This is `None` if all constraints of all worlds are rigid, i.e. if no world configures a non-zero
+    compliance and the model has neither dynamic nor effort-limited joint constraints.
 
     Shape of `(sum_of_max_total_cts,)`.
     """
@@ -925,6 +930,77 @@ def _build_free_velocity_sparse(
 
 
 @wp.kernel
+def _build_constraint_compliance(
+    # Inputs:
+    model_info_max_total_cts: wp.array[wp.int32],
+    model_info_total_cts_offset: wp.array[wp.int32],
+    model_info_joint_dynamic_cts_offset: wp.array[wp.int32],
+    model_info_joint_effort_cts_offset: wp.array[wp.int32],
+    model_info_joint_dynamic_cts_group_offset: wp.array[wp.int32],
+    model_info_joint_kinematic_cts_group_offset: wp.array[wp.int32],
+    model_info_joint_friction_cts_group_offset: wp.array[wp.int32],
+    model_info_joint_effort_cts_group_offset: wp.array[wp.int32],
+    data_info_num_total_cts: wp.array[wp.int32],
+    data_info_limit_cts_group_offset: wp.array[wp.int32],
+    data_info_contact_cts_group_offset: wp.array[wp.int32],
+    data_joints_inv_m_j: wp.array[wp.float32],
+    data_joints_inv_m_a: wp.array[wp.float32],
+    problem_config: wp.array[ConstrainedDynamicsConfigStruct],
+    # Outputs:
+    problem_R: wp.array[wp.float32],
+):
+    # Retrieve the thread index as the world index and constraint row index
+    wid, tid = wp.tid()
+
+    # Skip if row index exceed the maximum problem size
+    if tid >= model_info_max_total_cts[wid]:
+        return
+
+    # Retrieve the vector index offset of the world
+    vio = model_info_total_cts_offset[wid]
+
+    # Set zero compliance for inactive constraints
+    if tid >= data_info_num_total_cts[wid]:
+        problem_R[vio + tid] = 0.0
+        return
+
+    # Retrieve the world-specific problem config
+    config = problem_config[wid]
+
+    # Retrieve the start of each constraint group within the constraint block of the world
+    dcgo = model_info_joint_dynamic_cts_group_offset[wid]
+    kcgo = model_info_joint_kinematic_cts_group_offset[wid]
+    fcgo = model_info_joint_friction_cts_group_offset[wid]
+    ecgo = model_info_joint_effort_cts_group_offset[wid]
+    lcgo = data_info_limit_cts_group_offset[wid]
+    ccgo = data_info_contact_cts_group_offset[wid]
+
+    # Select the compliance of the constraint according to its group
+    # NOTE: Empty groups share their offset with the next group, so groups are tested in reverse order
+    r_k = wp.float32(0.0)
+    if tid >= ccgo:
+        # NOTE: Contact constraints are ordered as [t, o, n], i.e. with the normal direction last
+        if (tid - ccgo) % 3 == 2:
+            r_k = config.compliance_contacts_normal
+        else:
+            r_k = config.compliance_contacts_tangential
+    elif tid >= lcgo:
+        r_k = config.compliance_limits
+    elif tid >= ecgo:
+        r_k = data_joints_inv_m_a[model_info_joint_effort_cts_offset[wid] + tid - ecgo]
+    elif tid >= fcgo:
+        # Joint friction constraints are never compliant
+        r_k = wp.float32(0.0)
+    elif tid >= kcgo:
+        r_k = config.compliance_joints
+    else:
+        r_k = data_joints_inv_m_j[model_info_joint_dynamic_cts_offset[wid] + tid - dcgo]
+
+    # Store the compliance of the constraint
+    problem_R[vio + tid] = r_k
+
+
+@wp.kernel
 def _build_preconditioner_from_diagonal(
     # Inputs:
     problem_config: wp.array[ConstrainedDynamicsConfigStruct],
@@ -1016,6 +1092,66 @@ def _apply_preconditioner_to_bounds(
     inv_p = 1.0 / problem_P[row]
     problem_bound_lower[bio] *= inv_p
     problem_bound_upper[bio] *= inv_p
+
+
+###
+# Launchers
+###
+
+
+def build_constraint_compliance(
+    model: ModelKamino,
+    data: DataKamino,
+    config: wp.array[ConstrainedDynamicsConfigStruct],
+    R: wp.array[wp.float32],
+):
+    """
+    Builds the diagonal constraint compliance of each world for the current set of active constraints.
+
+    The compliance of each active constraint is selected according to its constraint group:
+
+    - dynamic joint constraints use the implicit joint dynamics compliance ``data.joints.inv_m_j``
+    - kinematic joint constraints use ``compliance_joints``
+    - joint friction constraints are always rigid
+    - effort-limited joint constraints use the implicit-PD compliance ``data.joints.inv_m_a``
+    - joint-limit constraints use ``compliance_limits``
+    - contact constraints use ``compliance_contacts_tangential`` along both tangential
+      directions and ``compliance_contacts_normal`` along the normal direction
+
+    The compliance of all inactive constraints is set to zero.
+
+    Args:
+        model: The model container holding time-invariant data.
+        data: The solver container holding the active constraints info and joint dynamics data.
+        config: The per-world problem configurations holding the compliance parameters.
+            Shape of ``(num_worlds,)``.
+        R: The output array of diagonal constraint compliance blocks in physical coordinates.
+            Shape of ``(sum_of_max_total_cts,)``.
+    """
+    wp.launch(
+        _build_constraint_compliance,
+        dim=(model.size.num_worlds, model.size.max_of_max_total_cts),
+        inputs=[
+            # Inputs:
+            model.info.max_total_cts,
+            model.info.total_cts_offset,
+            model.info.joint_dynamic_cts_offset,
+            model.info.joint_effort_cts_offset,
+            model.info.joint_dynamic_cts_group_offset,
+            model.info.joint_kinematic_cts_group_offset,
+            model.info.joint_friction_cts_group_offset,
+            model.info.joint_effort_cts_group_offset,
+            data.info.num_total_cts,
+            data.info.limit_cts_group_offset,
+            data.info.contact_cts_group_offset,
+            data.joints.inv_m_j,
+            data.joints.inv_m_a,
+            config,
+            # Outputs:
+            R,
+        ],
+        device=model.device,
+    )
 
 
 ###
@@ -1253,6 +1389,13 @@ class ConstrainedDynamicsProblem(ABC):
         # in order to allocate corresponding per-friction-cone parameters
         model_max_contacts_host = contacts.model_max_contacts_host if contacts is not None else 0
 
+        # Determine whether any constraint can be compliant, otherwise the compliance is omitted
+        has_compliance = (
+            any(c.has_compliance for c in self._config)
+            or model.size.sum_of_num_dynamic_joint_cts > 0
+            or model.size.sum_of_num_effort_joint_cts > 0
+        )
+
         # Allocate the problem data container holding the shared constraint-space data
         sum_of_max_total_cts = model.size.sum_of_max_total_cts
         with wp.ScopedDevice(self._device):
@@ -1288,6 +1431,7 @@ class ConstrainedDynamicsProblem(ABC):
                 bound_lower=wp.zeros(shape=(model.size.sum_of_num_bounded_joint_cts,), dtype=wp.float32),
                 bound_upper=wp.zeros(shape=(model.size.sum_of_num_bounded_joint_cts,), dtype=wp.float32),
                 P=wp.ones(shape=(sum_of_max_total_cts,), dtype=wp.float32),
+                R=wp.zeros(shape=(sum_of_max_total_cts,), dtype=wp.float32) if has_compliance else None,
                 eta=wp.zeros(shape=(sum_of_max_total_cts,), dtype=wp.float32),
             )
             self._all_worlds_mask = wp.ones(shape=(model.size.num_worlds,), dtype=wp.bool)
@@ -1347,6 +1491,10 @@ class ConstrainedDynamicsProblem(ABC):
         # Initialize problem data
         if reset_to_zero:
             self.zero()
+
+        # Build the constraint compliance first, since the formulation-specific operator may consume it
+        if self._data.R is not None:
+            build_constraint_compliance(model, data, self._data.config, self._data.R)
 
         # Build the formulation-specific linear operator data
         self._build_impl(model=model, data=data, jacobians=jacobians, reset_to_zero=reset_to_zero)

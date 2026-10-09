@@ -272,9 +272,9 @@ class DualProblem(ConstrainedDynamicsProblem):
     """
     The dual formulation of the constrained forward dynamics problem.
 
-    Realizes the linear operator of the problem in constraint space using the Delassus matrix
-    ``D = J M^{-1} J^T``, which is either stored explicitly and factorized (dense) or represented
-    as a matrix-free operator solved iteratively (sparse).
+    Realizes the linear operator of the problem in constraint space using the compliant Delassus
+    matrix ``D + R`` with ``D = J M^{-1} J^T``, which is either stored explicitly and factorized
+    (dense) or represented as a matrix-free operator solved iteratively (sparse).
     """
 
     _data_type = DualProblemData
@@ -373,6 +373,7 @@ class DualProblem(ConstrainedDynamicsProblem):
                 jacobians=jacobians,
                 solver=solver,
                 solver_kwargs=solver_kwargs,
+                compliance=self._data.R,
             )
             # Connect the operator to the regularization and preconditioner arrays of the problem
             self._delassus.set_regularization(self._data.eta)
@@ -385,6 +386,7 @@ class DualProblem(ConstrainedDynamicsProblem):
                 contacts=contacts,
                 solver=solver,
                 solver_kwargs=solver_kwargs,
+                compliance=self._data.R,
             )
             self._data.mio = self._delassus.info.mio
             self._data.D = self._delassus.D

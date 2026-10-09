@@ -205,11 +205,12 @@ class SolverKaminoImpl(SolverBase):
         if not self._config.padmm.use_graph_conditionals and issubclass(linear_solver_type, IterativeSolver):
             linear_solver_kwargs.setdefault("use_graph_conditionals", False)
 
-        # Bundle both constraint stabilization and forward-
-        # dynamics problem configurations into a single object
+        # Bundle the constraint stabilization, constraint compliance and
+        # forward-dynamics problem configurations into a single object
         problem_fd_config = DualProblem.Config(
             constraints=self._config.constraints,
             dynamics=self._config.dynamics,
+            compliance=self._config.compliance,
             # TODO: linear_solver_type=linear_solver_type,
             # TODO: linear_solver_kwargs=linear_solver_kwargs,
             # TODO: sparse=bool(self._config.sparse_dynamics),

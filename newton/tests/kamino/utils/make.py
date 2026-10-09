@@ -17,6 +17,11 @@ from newton._src.solvers.kamino._src.core.data import DataKamino
 from newton._src.solvers.kamino._src.core.math import quat_exp
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.core.state import StateKamino
+from newton._src.solvers.kamino._src.dynamics.config import (
+    ConstrainedDynamicsConfigStruct,
+    ConstrainedDynamicsProblemConfig,
+)
+from newton._src.solvers.kamino._src.dynamics.problem import build_constraint_compliance
 from newton._src.solvers.kamino._src.geometry.contacts import ContactsKamino
 from newton._src.solvers.kamino._src.geometry.detector import CollisionDetector
 from newton._src.solvers.kamino._src.kinematics.constraints import (
@@ -42,6 +47,7 @@ from .print import (
 ###
 
 __all__ = [
+    "make_constraint_compliance",
     "make_containers",
     "make_generalized_mass_matrices",
     "make_inverse_generalized_mass_matrices",
@@ -188,6 +194,29 @@ def update_containers(
         cdata = detector.contacts.data if detector is not None else None
         jacobians.build(model=model, data=data, limits=ldata, contacts=cdata)
         wp.synchronize()
+
+
+def make_constraint_compliance(
+    model: ModelKamino,
+    data: DataKamino,
+    config: ConstrainedDynamicsProblemConfig | None = None,
+) -> wp.array:
+    """
+    Builds the diagonal constraint compliance of all worlds for the current set of active constraints.
+
+    Args:
+        model: The model for which to build the compliance.
+        data: The model data holding the active constraints info and the joint dynamics data.
+        config: The problem config holding the compliance parameters of all worlds. Defaults to
+            rigid constraints, in which case only the implicit joint dynamics are compliant.
+    """
+    config = config if config is not None else ConstrainedDynamicsProblemConfig()
+    config_wp = wp.array(
+        [config.to_struct()] * model.size.num_worlds, dtype=ConstrainedDynamicsConfigStruct, device=model.device
+    )
+    R = wp.zeros(shape=(model.size.sum_of_max_total_cts,), dtype=wp.float32, device=model.device)
+    build_constraint_compliance(model, data, config_wp, R)
+    return R
 
 
 def make_test_problem(

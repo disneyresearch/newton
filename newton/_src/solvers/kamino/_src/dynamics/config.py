@@ -13,7 +13,12 @@ from enum import IntEnum
 import warp as wp
 
 from .....core.types import override
-from ...config import ConfigBase, ConstrainedDynamicsConfig, ConstraintStabilizationConfig
+from ...config import (
+    ConfigBase,
+    ConstrainedDynamicsConfig,
+    ConstraintComplianceConfig,
+    ConstraintStabilizationConfig,
+)
 from ..core.data import DataKamino
 from ..core.model import ModelKamino
 from ..geometry.contacts import ContactsKamino
@@ -79,6 +84,14 @@ class ConstrainedDynamicsConfigStruct:
     """Baumgarte stabilization parameter for unilateral contact constraints."""
     delta: wp.float32
     """Contact penetration margin used for unilateral contact constraints"""
+    compliance_joints: wp.float32
+    """Compliance of the kinematic (i.e. bilateral) joint constraints."""
+    compliance_limits: wp.float32
+    """Compliance of the unilateral joint-limit constraints."""
+    compliance_contacts_normal: wp.float32
+    """Compliance along the normal direction of unilateral contact constraints."""
+    compliance_contacts_tangential: wp.float32
+    """Compliance along the tangential directions of unilateral contact constraints."""
     preconditioning: wp.bool
     """Flag to enable diagonal preconditioning of the problem."""
 
@@ -95,6 +108,21 @@ class ConstrainedDynamicsProblemConfig(ConfigBase):
     dynamics: ConstrainedDynamicsConfig = field(default_factory=ConstrainedDynamicsConfig)
     """Constrained dynamics problem construction configurations."""
 
+    compliance: ConstraintComplianceConfig = field(default_factory=ConstraintComplianceConfig)
+    """Constraint compliance global defaults/override configurations."""
+
+    @property
+    def has_compliance(self) -> bool:
+        """
+        Returns `True` if any of the configurable constraint compliances is non-zero.
+        """
+        return (
+            self.compliance.joints > 0.0
+            or self.compliance.limits > 0.0
+            or self.compliance.contacts_normal > 0.0
+            or self.compliance.contacts_tangential > 0.0
+        )
+
     def to_struct(self) -> ConstrainedDynamicsConfigStruct:
         """
         Converts the config to a :class:`ConstrainedDynamicsConfigStruct`.
@@ -104,6 +132,10 @@ class ConstrainedDynamicsProblemConfig(ConfigBase):
         config_struct.beta = wp.float32(self.constraints.beta)
         config_struct.gamma = wp.float32(self.constraints.gamma)
         config_struct.delta = wp.float32(self.constraints.delta)
+        config_struct.compliance_joints = wp.float32(self.compliance.joints)
+        config_struct.compliance_limits = wp.float32(self.compliance.limits)
+        config_struct.compliance_contacts_normal = wp.float32(self.compliance.contacts_normal)
+        config_struct.compliance_contacts_tangential = wp.float32(self.compliance.contacts_tangential)
         config_struct.preconditioning = wp.bool(self.dynamics.preconditioning)
         return config_struct
 
@@ -114,6 +146,7 @@ class ConstrainedDynamicsProblemConfig(ConfigBase):
         """
         self.constraints.validate()
         self.dynamics.validate()
+        self.compliance.validate()
 
     @override
     def __post_init__(self):
