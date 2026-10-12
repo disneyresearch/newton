@@ -168,6 +168,9 @@ class SolverKamino(SolverBase, CouplingInterface):
         collision_detector: CollisionDetectorConfig | None = None
         """
         Configurations for the collision detector.\n
+        Its contact capacity settings, ``max_contacts_per_world`` and ``max_contacts``,
+        also apply to contacts from a Newton ``CollisionPipeline`` when
+        ``use_collision_detector`` is disabled.\n
         See :class:`CollisionDetectorConfig` for more details.\n
         If `None`, the default configuration will be used.
         """
@@ -441,7 +444,7 @@ class SolverKamino(SolverBase, CouplingInterface):
                 self.sparse_jacobian = self.dynamics_solver == "dvi"
 
             # Default-initialize any sub-configurations that were not explicitly provided by the user
-            if self.collision_detector is None and self.use_collision_detector:
+            if self.collision_detector is None:
                 self.collision_detector = config.CollisionDetectorConfig()
             if self.fk is None and self.use_fk_solver:
                 self.fk = config.ForwardKinematicsSolverConfig()

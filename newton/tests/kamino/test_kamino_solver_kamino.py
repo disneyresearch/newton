@@ -790,6 +790,17 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertIsNotNone(solver._collision_detector_kamino)
         self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1, 1, 1])
 
+    def test_external_contacts_use_collision_detector_capacity_settings(self):
+        """Apply collision_detector capacity settings to external contacts without enabling internal detection."""
+        model = self._make_three_world_model()
+        config = SolverKamino.Config(use_collision_detector=False)
+        config.collision_detector.max_contacts_per_world = 2
+
+        solver = SolverKamino(model, config=config)
+        self.assertIsNone(solver._collision_detector_kamino)
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [2, 2, 2])
+        self.assertEqual(model.rigid_contact_max, 6)
+
     def test_assigned_max_contacts_per_pair_warns_at_solver_creation(self):
         """Warn at solver creation when max_contacts_per_pair is assigned after config construction."""
         model = self._make_three_world_model()
