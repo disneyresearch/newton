@@ -7,6 +7,8 @@ Provides mechanisms to define and manage constraints and their associated input/
 
 from __future__ import annotations
 
+from itertools import accumulate
+
 import warp as wp
 
 from ..core.data import DataKamino
@@ -47,6 +49,9 @@ def get_max_constraints_per_world(
     """
     Returns the maximum number of constraints for each world in the model.
 
+    A world without any joint, limit, or contact constraint rows is given one
+    inactive row, since dense linear operators require positive block dimensions.
+
     Args:
         model: The model for which to compute the maximum constraints.
         limits: The container holding the allocated joint-limit data.
@@ -78,7 +83,7 @@ def get_max_constraints_per_world(
     maxnl = limits.world_max_limits_host if limits and limits.model_max_limits_host > 0 else [0] * nw
     maxnc = contacts.world_max_contacts_host if contacts and contacts.model_max_contacts_host > 0 else [0] * nw
     nbc = model.info.num_joint_bounded_cts.numpy()
-    maxncts = [njc[i] + nbc[i] + maxnl[i] + 3 * maxnc[i] for i in range(nw)]
+    maxncts = [max(1, int(njc[i] + nbc[i] + maxnl[i] + 3 * maxnc[i])) for i in range(nw)]
     return maxncts
 
 
@@ -196,14 +201,10 @@ def make_unilateral_constraints_info(
     # Compute the maximum number of constraints per world: limits, contacts, and total
     world_maxnlc: list[int] = list(world_maxnl)
     world_maxncc: list[int] = [3 * maxnc for maxnc in world_maxnc]
-    world_njc = model.info.num_joint_bilateral_cts.numpy().tolist()
     world_njdc = model.info.num_joint_dynamic_cts.numpy().tolist()
     world_njkc = model.info.num_joint_kinematic_cts.numpy().tolist()
     joints_world = model.joints.wid.numpy().tolist()
-    world_maxncts = [
-        njc + nbc + maxnl + maxnc
-        for njc, nbc, maxnl, maxnc in zip(world_njc, world_nbc, world_maxnlc, world_maxncc, strict=True)
-    ]
+    world_maxncts = get_max_constraints_per_world(model, limits, contacts)
     model.size.sum_of_max_total_cts = sum(world_maxncts)
     model.size.max_of_max_total_cts = max(world_maxncts)
 
@@ -217,10 +218,7 @@ def make_unilateral_constraints_info(
 
     # Compute the per-world absolute total constraint block offsets
     # NOTE: These are the per-world start indices of arrays like the constraint multipliers `lambda`.
-    world_ctsio = [0] + [
-        sum(world_njc[:i]) + sum(world_nbc[:i]) + sum(world_maxnlc[:i]) + sum(world_maxncc[:i])
-        for i in range(1, num_worlds + 1)
-    ]
+    world_ctsio = list(accumulate(world_maxncts, initial=0))
 
     # Compute the initial values of the absolute constraint group
     # offsets for joints (dynamic + kinematic), limits, contacts

@@ -692,6 +692,54 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         solver.step(state_in, state_out, None, None, dt=1.0 / 60.0)
 
 
+class TestConstraintFreeWorlds(unittest.TestCase):
+    """Verify that worlds without joint, limit, or contact rows construct and step."""
+
+    def setUp(self):
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.default_device = wp.get_device(test_context.device)
+
+    def test_free_body_without_shapes_constructs_and_steps(self):
+        """Advance a free body without shapes, whose world has no constraint rows, under gravity."""
+        configs = {
+            "padmm_dense": {"dynamics_solver": "padmm"},
+            "padmm_sparse": {
+                "dynamics_solver": "padmm",
+                "sparse_jacobian": True,
+                "sparse_dynamics": True,
+                "dynamics": kamino_config.ConstrainedDynamicsConfig(linear_solver_type="CR"),
+            },
+            "dvi_dense": {"dynamics_solver": "dvi"},
+            "dvi_sparse": {"dynamics_solver": "dvi", "sparse_dynamics": True},
+        }
+        for name, kwargs in configs.items():
+            with self.subTest(config=name):
+                builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+                SolverKamino.register_custom_attributes(builder)
+                builder.add_body(
+                    xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), mass=1.0, inertia=UNIT_INERTIA
+                )
+                model = builder.finalize(device=self.default_device)
+
+                config = SolverKamino.Config(
+                    use_collision_detector=True,
+                    collision_detector=kamino_config.CollisionDetectorConfig(max_contacts_per_world=0),
+                    **kwargs,
+                )
+                solver = SolverKamino(model, config=config)
+                self.assertIsNone(solver._contacts_kamino)
+
+                state_in = model.state()
+                state_out = model.state()
+                solver.step(state_in, state_out, control=None, contacts=None, dt=SIM_DT)
+
+                body_qd = state_out.body_qd.numpy()
+                gravity_z = float(model.gravity.numpy()[0][2])
+                self.assertTrue(np.all(np.isfinite(body_qd)))
+                np.testing.assert_allclose(body_qd[0, 2], gravity_z * SIM_DT, rtol=1.0e-4)
+
+
 class TestSolverKaminoStatus(unittest.TestCase):
     def setUp(self):
         """Configure the default Warp device for status tests."""

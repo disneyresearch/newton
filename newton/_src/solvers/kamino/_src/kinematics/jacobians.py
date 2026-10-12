@@ -34,6 +34,7 @@ from ..geometry.contacts import ContactsKamino
 from ..kinematics.limits import LimitsKamino
 from ..linalg.sparse_matrix import BlockDType, BlockSparseMatrices
 from ..linalg.sparse_operator import BlockSparseLinearOperators
+from .constraints import get_max_constraints_per_world
 from .joints import gimbal_reciprocal_axes, universal_intermediary_axes
 
 ###
@@ -1512,12 +1513,8 @@ class DenseSystemJacobians:
         # Extract the constraint and DoF sizes of each world
         nw = model.info.num_worlds
         nbd = model.info.num_body_dofs.numpy().tolist()
-        njc = model.info.num_joint_bilateral_cts.numpy().tolist()
-        nbc = model.info.num_joint_bounded_cts.numpy().tolist()
         njd = model.info.num_joint_dofs.numpy().tolist()
-        maxnl = limits.world_max_limits_host if limits and limits.model_max_limits_host > 0 else [0] * nw
-        maxnc = contacts.world_max_contacts_host if contacts and contacts.model_max_contacts_host > 0 else [0] * nw
-        maxncts = [njc[w] + nbc[w] + maxnl[w] + 3 * maxnc[w] for w in range(nw)]
+        maxncts = get_max_constraints_per_world(model, limits, contacts)
 
         # Compute the sizes of the Jacobian matrix data for each world
         J_cts_sizes = [maxncts[i] * nbd[i] for i in range(nw)]
@@ -1762,8 +1759,6 @@ class SparseSystemJacobians:
         # Extract the constraint and DoF sizes of each world
         num_worlds = model.info.num_worlds
         num_body_dofs = model.info.num_body_dofs.numpy().tolist()
-        num_bilateral_joint_cts = model.info.num_joint_bilateral_cts.numpy().tolist()
-        num_bounded_joint_cts = model.info.num_joint_bounded_cts.numpy().tolist()
         num_joint_dofs = model.info.num_joint_dofs.numpy().tolist()
         max_num_limits = (
             limits.world_max_limits_host if limits and limits.model_max_limits_host > 0 else [0] * num_worlds
@@ -1771,10 +1766,7 @@ class SparseSystemJacobians:
         max_num_contacts = (
             contacts.world_max_contacts_host if contacts and contacts.model_max_contacts_host > 0 else [0] * num_worlds
         )
-        max_num_constraints = [
-            num_bilateral_joint_cts[w] + num_bounded_joint_cts[w] + max_num_limits[w] + 3 * max_num_contacts[w]
-            for w in range(num_worlds)
-        ]
+        max_num_constraints = get_max_constraints_per_world(model, limits, contacts)
 
         # Compute the number of non-zero blocks required for each Jacobian matrix, as well as the
         # per-joint and per-dof offsets, and nzb coordinates.
@@ -1938,8 +1930,10 @@ class SparseSystemJacobians:
 
             # Set all constant values into BSMs (corresponding to joint dofs/cts)
             if bsm_cts.max_of_max_dims[0] * bsm_cts.max_of_max_dims[1] > 0:
-                assign_to_warp_int32_array(bsm_cts.nzb_row, J_cts_nzb_row)
-                assign_to_warp_int32_array(bsm_cts.nzb_col, J_cts_nzb_col)
+                # Worlds without constraints keep a padded row but have no non-zero blocks
+                if len(J_cts_nzb_row) > 0:
+                    assign_to_warp_int32_array(bsm_cts.nzb_row, J_cts_nzb_row)
+                    assign_to_warp_int32_array(bsm_cts.nzb_col, J_cts_nzb_col)
                 assign_to_warp_int32_array(bsm_cts.num_cols, num_body_dofs)
             if bsm_dofs.max_of_max_dims[0] * bsm_dofs.max_of_max_dims[1] > 0:
                 assign_to_warp_int32_array(bsm_dofs.nzb_row, J_dofs_nzb_row)
@@ -2223,18 +2217,13 @@ class ColMajorSparseConstraintJacobians(BlockSparseLinearOperators[wp.float32, w
         # Extract the constraint and DoF sizes of each world
         num_worlds = model.info.num_worlds
         num_body_dofs = model.info.num_body_dofs.numpy().tolist()
-        num_bilateral_joint_cts = model.info.num_joint_bilateral_cts.numpy().tolist()
-        num_bounded_joint_cts = model.info.num_joint_bounded_cts.numpy().tolist()
         max_num_limits = (
             limits.world_max_limits_host if limits and limits.model_max_limits_host > 0 else [0] * num_worlds
         )
         max_num_contacts = (
             contacts.world_max_contacts_host if contacts and contacts.model_max_contacts_host > 0 else [0] * num_worlds
         )
-        max_num_constraints = [
-            num_bilateral_joint_cts[w] + num_bounded_joint_cts[w] + max_num_limits[w] + 3 * max_num_contacts[w]
-            for w in range(num_worlds)
-        ]
+        max_num_constraints = get_max_constraints_per_world(model, limits, contacts)
 
         # Compute the number of non-zero blocks required for Jacobian matrix, using 6 1x6 blocks per
         # body per joint/limit/contact
@@ -2363,8 +2352,10 @@ class ColMajorSparseConstraintJacobians(BlockSparseLinearOperators[wp.float32, w
 
             # Set all constant values into BSM
             if self.bsm.max_of_max_dims[0] * self.bsm.max_of_max_dims[1] > 0:
-                assign_to_warp_int32_array(self.bsm.nzb_row, J_cts_nzb_row)
-                assign_to_warp_int32_array(self.bsm.nzb_col, J_cts_nzb_col)
+                # Worlds without constraints keep a padded row but have no non-zero blocks
+                if len(J_cts_nzb_row) > 0:
+                    assign_to_warp_int32_array(self.bsm.nzb_row, J_cts_nzb_row)
+                    assign_to_warp_int32_array(self.bsm.nzb_col, J_cts_nzb_col)
                 assign_to_warp_int32_array(self.bsm.num_cols, num_body_dofs)
 
             # Convert per-world nzb offsets to global nzb offsets
