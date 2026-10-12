@@ -270,6 +270,7 @@ class SolverKaminoImpl(SolverBase):
                 use_graph_conditionals=padmm_config.use_graph_conditionals,
                 collect_info=self._config.collect_solver_info,
             )
+            self._solver_fd.prepare(self._problem_fd)
         elif self._config.dynamics_solver == "dvi":
             # DVI consumes Kamino's unified joint, limit, and contact
             # DualProblem rather than rebuilding standalone constraint pipelines.

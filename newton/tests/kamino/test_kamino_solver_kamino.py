@@ -419,12 +419,35 @@ class TestSolverKaminoConfig(unittest.TestCase):
                 kamino_config.PADMMSolverConfig(warmstart_scale=scale)
 
     def test_02_reject_dense_adaptive_padmm_penalty(self):
-        """Reject adaptive PADMM penalties with dense dynamics."""
-        with self.assertRaisesRegex(ValueError, "Adaptive PADMM penalty updates require `sparse_dynamics=True`"):
+        """Reject balanced PADMM penalties with dense dynamics, but accept spectral ones."""
+        with self.assertRaisesRegex(ValueError, "Balanced PADMM penalty updates require `sparse_dynamics=True`"):
             SolverKamino.Config(
                 sparse_dynamics=False,
                 padmm=kamino_config.PADMMSolverConfig(penalty_update_method="balanced"),
             )
+        for dynamics_solver, padmm_kwarg in (("padmm", "padmm"), ("padmm_primal", "padmm_primal")):
+            config_type = (
+                kamino_config.PADMMPrimalSolverConfig
+                if dynamics_solver == "padmm_primal"
+                else kamino_config.PADMMSolverConfig
+            )
+            config = SolverKamino.Config(
+                dynamics_solver=dynamics_solver,
+                sparse_dynamics=False,
+                **{padmm_kwarg: config_type(penalty_update_method="spectral", penalty_update_freq=10)},
+            )
+            self.assertEqual(getattr(config, padmm_kwarg).penalty_update_method, "spectral")
+
+    def test_02_validate_spectral_padmm_penalty(self):
+        """Reject invalid parameters of the spectral PADMM penalty."""
+        for kwargs in (
+            {"spectral_power_inc": -0.1},
+            {"spectral_power_dec": -0.1},
+            {"spectral_max_iterations": 0},
+            {"spectral_tolerance": -1.0},
+        ):
+            with self.subTest(**kwargs), self.assertRaises(ValueError):
+                kamino_config.PADMMSolverConfig(penalty_update_method="spectral", **kwargs)
 
 
 class TestCollisionCapacityInitialization(unittest.TestCase):

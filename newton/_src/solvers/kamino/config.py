@@ -656,13 +656,57 @@ class PADMMSolverConfig:
     """
     The permitted frequency of penalty updates.\n
     If zero, no updates are performed. Otherwise, updates are performed every
-    `penalty_update_freq` iterations. Defaults to `1`.
+    `penalty_update_freq` iterations. Defaults to `1`.\n
+    For the `spectral` method, the iterations are performed in blocks of `penalty_update_freq`
+    iterations, after each of which the penalty is updated and the linear system of the problem
+    is refreshed (e.g. re-factorized), so that larger values reduce the cost of the updates.
     """
 
-    penalty_update_method: Literal["fixed", "balanced"] = "fixed"
+    penalty_update_method: Literal["fixed", "balanced", "spectral"] = "fixed"
     """
     The penalty update method used to adapt the penalty parameter.\n
+    - `fixed`: The penalty is constant and equal to `rho_0`.
+    - `balanced`: The penalty is scaled by `tau` when the ratio of the primal and dual
+      residuals exceeds `alpha`. Requires sparse dynamics.
+    - `spectral`: The penalty is computed as `rho = sqrt(m * L) * kappa^p` from the extreme
+      eigenvalues `m`, `L` of the regularized (preconditioned) Delassus operator, with
+      `kappa = L / m`, which are estimated at the beginning of each solve. The exponent `p` starts
+      at `spectral_power_0` and is adapted from the residual ratio w.r.t. `alpha` (see
+      `spectral_power_inc` and `spectral_power_dec`). The initial penalty `rho_0` is ignored.\n
     Defaults to `fixed`. See :class:`PADMMPenaltyUpdate` for details.
+    """
+
+    spectral_power_0: float = 0.2
+    """
+    The initial exponent `p` of the `spectral` penalty `rho = sqrt(m * L) * kappa^p`.\n
+    Defaults to `0.2`.
+    """
+
+    spectral_power_inc: float = 0.05
+    """
+    The increment of the exponent `p` of the `spectral` penalty, applied when the primal
+    residual exceeds `alpha` times the dual residual, which increases the penalty.\n
+    Must be non-negative. Defaults to `0.05`.
+    """
+
+    spectral_power_dec: float = 0.05
+    """
+    The decrement of the exponent `p` of the `spectral` penalty, applied when the dual
+    residual exceeds `alpha` times the primal residual, which decreases the penalty.\n
+    Must be non-negative. Defaults to `0.05`.
+    """
+
+    spectral_max_iterations: int = 20
+    """
+    The maximum number of power iterations used to estimate the largest eigenvalue `L` of
+    the `spectral` penalty. The estimates are warm-started across solves.\n
+    Must be greater than zero. Defaults to `20`.
+    """
+
+    spectral_tolerance: float = 1e-3
+    """
+    The relative tolerance on the change of the eigenvalue estimates of the power iterations.\n
+    Must be non-negative. Defaults to `1e-3`.
     """
 
     linear_solver_tolerance: float = 0.0
@@ -893,6 +937,16 @@ class PADMMSolverConfig:
             )
         if not 0.0 <= self.warmstart_scale <= 1.0:
             raise ValueError(f"Invalid warmstart scale: {self.warmstart_scale}. Must be in the range [0, 1].")
+        if self.spectral_power_inc < 0.0:
+            raise ValueError(f"Invalid spectral power increment: {self.spectral_power_inc}. Must be non-negative.")
+        if self.spectral_power_dec < 0.0:
+            raise ValueError(f"Invalid spectral power decrement: {self.spectral_power_dec}. Must be non-negative.")
+        if self.spectral_max_iterations <= 0:
+            raise ValueError(
+                f"Invalid spectral max iterations: {self.spectral_max_iterations}. Must be a positive integer."
+            )
+        if self.spectral_tolerance < 0.0:
+            raise ValueError(f"Invalid spectral tolerance: {self.spectral_tolerance}. Must be non-negative.")
 
         # Ensure that the enum-valued parameters are valid options
         # Conversion to enum-type configs will raise an error
@@ -922,6 +976,10 @@ class PADMMPrimalSolverConfig(PADMMSolverConfig):
     - The `primal_tolerance` applies to the primal residual of the primal algorithm, i.e. the
       constraint-velocity consistency, and the `dual_tolerance` to its dual residual, i.e. the
       consistency of the trial and admissible constraint reactions.
+    - The `spectral` penalty is `rho = kappa^{-p} / sqrt(m * L)`, i.e. the inverse of the dual
+      spectral penalty, whose exponent `p` is increased by `spectral_power_inc` when the dual
+      residual exceeds `alpha` times the primal residual (which decreases `rho`), and decreased by
+      `spectral_power_dec` in the opposite case. The parameters are thus shared with the dual one.
     """
 
     rho_min: float = 0.0

@@ -1,0 +1,1 @@
+Add the `"spectral"` penalty update method to the PADMM backends of `SolverKamino` via `SolverKamino.Config.padmm.penalty_update_method`, which sets the penalty from power-iteration estimates of the extreme eigenvalues of the regularized Delassus operator and adapts it every `penalty_update_freq` iterations, also for dense problems.

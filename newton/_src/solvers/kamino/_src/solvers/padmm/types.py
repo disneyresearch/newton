@@ -85,26 +85,19 @@ class PADMMPenaltyUpdate(IntEnum):
         `rho` is initialized to `config.rho_0`, remaining constant over the solve.
     """
 
-    # TODO: Implement adaptive penalty updates
-    # LINEAR = 1
-    # """
-    # Linear penalty update:
-    # `rho` is increased by a fixed factor.
-    # """
-    # BALANCED = 1
-    # """
-    # Balanced-residuals penalty update:
-    # `rho` is increased in order for the ratio of primal/dual residuals to be close to unity.
-    # """
-    # SPECTRAL = 2
-    # """
-    # Spectral penalty update:
-    # `rho` is increased by the spectral radius of the Delassus matrix.
-    # """
     BALANCED = 1
     """
     Balanced-residuals penalty update:
     `rho` is increased in order for the ratio of primal/dual residuals to be close to unity.
+    """
+
+    SPECTRAL = 2
+    """
+    Spectral penalty update:
+    `rho` is set from the extreme eigenvalues `m` and `L` of the regularized (preconditioned)
+    Delassus operator as `rho = sqrt(m * L) * kappa^p`, with condition number `kappa = L / m`,
+    and the exponent `p` is adapted from the ratio of the primal/dual residuals every
+    `config.penalty_update_freq` iterations.
     """
 
     @classmethod
@@ -279,6 +272,15 @@ class PADMMConfigStruct:
     warmstart_scale: wp.float32
     """Scale applied to cached constraint forces during warm-starting. Defaults to `0.9`."""
 
+    spectral_power_0: wp.float32
+    """The initial exponent `p` of the spectral penalty `rho = sqrt(m * L) * kappa^p`. Defaults to `0.2`."""
+
+    spectral_power_inc: wp.float32
+    """The increment of the spectral exponent `p` when the primal residual dominates. Defaults to `0.05`."""
+
+    spectral_power_dec: wp.float32
+    """The decrement of the spectral exponent `p` when the dual residual dominates. Defaults to `0.05`."""
+
 
 @wp.struct
 class PADMMStatus:
@@ -419,6 +421,9 @@ class PADMMPenalty:
             operator) is performed in-place, we must keep track of the
             previous penalty value  to remove the previous regularization
             before applying the current penalty value.
+        p: The current exponent of the spectral penalty `rho = sqrt(m * L) * kappa^p`.
+        m: The estimate of the smallest eigenvalue of the regularized operator used by the spectral penalty.
+        L: The estimate of the largest eigenvalue of the regularized operator used by the spectral penalty.
     """
 
     num_updates: wp.int32
@@ -443,6 +448,21 @@ class PADMMPenalty:
     operator) is performed in-place, we must keep track of the
     previous penalty value  to remove the previous regularization
     before applying the current penalty value.
+    """
+
+    p: wp.float32
+    """The current exponent of the spectral penalty `rho = sqrt(m * L) * kappa^p`."""
+
+    m: wp.float32
+    """
+    The estimate of the smallest eigenvalue `lambda_min(P (D + R) P) + eta` of the
+    regularized (preconditioned) Delassus operator used by the spectral penalty.
+    """
+
+    L: wp.float32
+    """
+    The estimate of the largest eigenvalue `lambda_max(P (D + R) P) + eta` of the
+    regularized (preconditioned) Delassus operator used by the spectral penalty.
     """
 
 
@@ -1290,4 +1310,7 @@ def convert_config_to_struct(config: PADMMSolverConfig) -> PADMMConfigStruct:
     config_struct.linear_solver_tolerance = config.linear_solver_tolerance
     config_struct.linear_solver_tolerance_ratio = config.linear_solver_tolerance_ratio
     config_struct.warmstart_scale = config.warmstart_scale
+    config_struct.spectral_power_0 = config.spectral_power_0
+    config_struct.spectral_power_inc = config.spectral_power_inc
+    config_struct.spectral_power_dec = config.spectral_power_dec
     return config_struct

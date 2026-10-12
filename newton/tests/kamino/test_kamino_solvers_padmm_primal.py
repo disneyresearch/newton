@@ -144,7 +144,7 @@ class TestPADMMPrimalSolver(unittest.TestCase):
     def tearDown(self):
         self.default_device = None
 
-    def _check_iterates_match_dual_padmm(self, test: TestSetup, use_acceleration: bool):
+    def _check_iterates_match_dual_padmm(self, test: TestSetup, use_acceleration: bool, **config_kwargs):
         """
         Checks the iterate-wise equivalence of the primal PADMM on the primal problem with penalty
         `rho` and of the (dual) PADMM on the dual problem with penalty `1 / rho`.
@@ -152,6 +152,7 @@ class TestPADMMPrimalSolver(unittest.TestCase):
         rho = 2.0
         common = {"primal_tolerance": 0.0, "dual_tolerance": 0.0, "compl_tolerance": 0.0, "eta": 1e-3}
         common["max_iterations"] = 25
+        common.update(config_kwargs)
         solvers = {
             "dual": (
                 PADMMSolver(
@@ -238,7 +239,21 @@ class TestPADMMPrimalSolver(unittest.TestCase):
                     self.assertEqual(test.primal.operator.preconditioner, preconditioner)
                     self._check_iterates_match_dual_padmm(test, use_acceleration=True)
 
-    def test_04_solve_converges(self):
+    def test_04_iterates_match_dual_padmm_with_spectral_penalty(self):
+        for builder_fn in (basics.build_box_on_plane, basics.build_boxes_fourbar):
+            for sparse in (False, True):
+                with self.subTest(builder=builder_fn.__name__, sparse=sparse):
+                    test = TestSetup(builder_fn, self.default_device, sparse=sparse)
+                    self._check_iterates_match_dual_padmm(
+                        test,
+                        use_acceleration=True,
+                        penalty_update_method="spectral",
+                        penalty_update_freq=5,
+                        spectral_max_iterations=100,
+                        spectral_tolerance=1e-6,
+                    )
+
+    def test_05_solve_converges(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 test = TestSetup(basics.build_box_on_plane, self.default_device, sparse=sparse)
@@ -329,6 +344,23 @@ class TestSolverKaminoPrimalPADMM(unittest.TestCase):
                 body_q = {
                     s: self._simulate_fourbar(
                         s, sparse, num_steps=20, dynamic_joints=True, implicit_pd=True, compliance=compliance
+                    )
+                    for s in ("padmm", "padmm_primal")
+                }
+                np.testing.assert_allclose(body_q["padmm_primal"], body_q["padmm"], atol=1e-4)
+
+    def test_04_trajectories_match_padmm_with_spectral_penalty(self):
+        """Checks that simulations with the spectral penalty coincide for both PADMM solvers."""
+        spectral = {"penalty_update_method": "spectral", "penalty_update_freq": 10, "use_graph_conditionals": False}
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                body_q = {
+                    s: self._simulate_fourbar(
+                        s,
+                        sparse,
+                        num_steps=20,
+                        padmm=PADMMSolverConfig(**spectral),
+                        padmm_primal=PADMMPrimalSolverConfig(**spectral),
                     )
                     for s in ("padmm", "padmm_primal")
                 }

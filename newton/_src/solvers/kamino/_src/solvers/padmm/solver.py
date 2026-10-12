@@ -11,15 +11,20 @@ See the :mod:`newton._src.solvers.kamino.solvers.padmm` module for a detailed de
 
 from __future__ import annotations
 
+import math
+
 import warp as wp
 
 from ....config import PADMMPrimalSolverConfig, PADMMSolverConfig
 from ...core.data import DataKamino
+from ...core.math import FLOAT32_MAX
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
 from ...dynamics.problem import ConstrainedDynamicsProblem
+from ...dynamics.spectral import make_problem_operator
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
+from ...linalg.eigen import PowerIteration
 from ...linalg.linear import IterativeSolver
 from ...utils.tile import get_block_dim, get_tile_size
 from .kernels import (
@@ -30,13 +35,17 @@ from .kernels import (
     _compute_final_desaxce_correction,
     _compute_projection_argument,
     _compute_solution_vectors,
+    _compute_spectral_lower_bound,
     _compute_velocity_bias,
+    _initialize_spectral_penalty,
     _make_compute_infnorm_residuals_kernel,
     _make_project_dual_convergence_accel_kernel,
     _project_to_feasible_cone,
     _reset_solver_data,
     _scale_warmstart_forces,
     _update_problem_proximal_regularization,
+    _update_problem_spectral_regularization,
+    _update_spectral_penalty,
     _warmstart_contact_constraints,
     _warmstart_desaxce_correction,
     _warmstart_joint_constraints,
@@ -86,7 +95,7 @@ class PADMMSolver:
     - the iterates are those of the Lagrange dual of the constrained forward dynamics problem,
       which are identical to those of the primal PADMM with penalty `1 / rho`.
     - is based on the Proximal-ADMM algorithm, which introduces a proximal regularization term
-    - supports multiple penalty update methods, including fixed, linear, and spectral updates.
+    - supports multiple penalty update methods, including fixed, balanced-residuals, and spectral updates.
     - can be configured with various tolerances, penalty parameters, and other settings.
     """
 
@@ -134,6 +143,16 @@ class PADMMSolver:
         self._use_adaptive_penalty: bool = False
         self._use_graph_conditionals: bool = True
         self._collect_info: bool = False
+
+        # Declare the spectral penalty data
+        self._use_spectral_penalty: bool = False
+        self._spectral_update_freq: int = 0
+        self._spectral_max_iterations: int = 0
+        self._spectral_tolerance: float = 0.0
+        self._spectral_mask: wp.array[wp.bool] | None = None
+        self._spectral_lower_bound: wp.array[wp.float32] | None = None
+        self._spectral_power_iteration: PowerIteration | None = None
+        self._spectral_problem: ConstrainedDynamicsProblem | None = None
 
         # Declare the model size cache
         self._size: SizeKamino | None = None
@@ -246,10 +265,32 @@ class PADMMSolver:
         self._use_graph_conditionals = use_graph_conditionals
         self._collect_info = collect_info
 
-        # Check if any world uses adaptive penalty updates (requiring per-step regularization updates)
-        self._use_adaptive_penalty = any(
-            PADMMPenaltyUpdate.from_string(c.penalty_update_method) != PADMMPenaltyUpdate.FIXED for c in self._config
-        )
+        # Check if any world uses in-loop adaptive penalty updates (requiring per-iteration regularization updates)
+        methods = [PADMMPenaltyUpdate.from_string(c.penalty_update_method) for c in self._config]
+        self._use_adaptive_penalty = any(m == PADMMPenaltyUpdate.BALANCED for m in methods)
+
+        # Check if any world uses the spectral penalty, which is updated after blocks of iterations
+        spectral_configs = [c for c, m in zip(self._config, methods, strict=True) if m == PADMMPenaltyUpdate.SPECTRAL]
+        self._use_spectral_penalty = len(spectral_configs) > 0
+        self._spectral_update_freq = 0
+        self._spectral_max_iterations = 0
+        self._spectral_tolerance = 0.0
+        self._spectral_mask = None
+        self._spectral_lower_bound = None
+        self._spectral_power_iteration = None
+        self._spectral_problem = None
+        if self._use_spectral_penalty:
+            update_freqs = {c.penalty_update_freq for c in spectral_configs}
+            if len(update_freqs) > 1:
+                raise ValueError(
+                    f"All worlds using the spectral penalty must use the same `penalty_update_freq`, got {update_freqs}."
+                )
+            self._spectral_update_freq = update_freqs.pop()
+            self._spectral_max_iterations = max(c.spectral_max_iterations for c in spectral_configs)
+            self._spectral_tolerance = min(c.spectral_tolerance for c in spectral_configs)
+            with wp.ScopedDevice(self._device):
+                self._spectral_mask = wp.array([m == PADMMPenaltyUpdate.SPECTRAL for m in methods], dtype=wp.bool)
+                self._spectral_lower_bound = wp.zeros(shape=(self._size.num_worlds,), dtype=wp.float32)
 
         # Compute the largest max iterations across all worlds
         # NOTE: This is needed to allocate the solver
@@ -309,6 +350,26 @@ class PADMMSolver:
                 ],
                 device=self.device,
             )
+
+    def prepare(self, problem: ConstrainedDynamicsProblem):
+        """
+        Allocates the solver data that depends on the problem to be solved, e.g. the power iteration
+        estimating the spectrum of its operator for the spectral penalty.
+
+        This is performed lazily by the first call to :meth:`solve` for a given problem, but should be
+        performed beforehand if the solves are captured in CUDA graphs, since it allocates memory.
+
+        Args:
+            problem: The forward dynamics problem to be solved.
+        """
+        if not self._use_spectral_penalty or self._spectral_problem is problem:
+            return
+        self._spectral_power_iteration = PowerIteration(
+            operator=make_problem_operator(problem, preconditioned=True),
+            max_iterations=self._spectral_max_iterations,
+            tolerance=self._spectral_tolerance,
+        )
+        self._spectral_problem = problem
 
     def coldstart(self):
         """
@@ -402,6 +463,10 @@ class PADMMSolver:
         # Initialize the solver status, ALM penalty, and iterative solver tolerance
         self._initialize()
 
+        # Initialize the spectral penalty from the extreme eigenvalues of the problem operator
+        if self._use_spectral_penalty:
+            self._initialize_spectral_penalty(problem)
+
         # Add the diagonal proximal regularization to the linear system of the problem, e.g.
         # D_{eta,rho} := D + (eta + rho) * I_{ncts} for the dual formulation
         self._update_regularization(problem)
@@ -411,12 +476,24 @@ class PADMMSolver:
             self._data.info.zero()
 
         # Iterate until convergence or maximum number of iterations is reached
+        # NOTE: With the spectral penalty, the iterations are performed in blocks, after each of which the
+        # penalty is updated and the linear system of the problem is refreshed (e.g. re-factorized)
         step_fn = self._step_accel if self._use_acceleration else self._step
+        loop_fn, num_loops = step_fn, self._max_of_max_iters
+        if self._use_spectral_penalty and self._spectral_update_freq > 0:
+            block_size = self._spectral_update_freq
+
+            def loop_fn(problem: ConstrainedDynamicsProblem):
+                for _ in range(block_size):
+                    step_fn(problem)
+                self._update_spectral_penalty(problem)
+
+            num_loops = math.ceil(self._max_of_max_iters / block_size)
         if self._use_graph_conditionals:
-            wp.capture_while(self._data.state.done, while_body=step_fn, problem=problem)
+            wp.capture_while(self._data.state.done, while_body=loop_fn, problem=problem)
         else:
-            for _ in range(self._max_of_max_iters):
-                step_fn(problem)
+            for _ in range(num_loops):
+                loop_fn(problem)
 
         # Update the final solution from the terminal PADMM state
         self._update_solution(problem)
@@ -542,6 +619,72 @@ class PADMMSolver:
         Calling ``prepare_solve`` here, *after* the update, records the refresh in the body.
         """
         self._update_problem_regularization(problem)
+        problem.prepare_solve()
+
+    def _initialize_spectral_penalty(self, problem: ConstrainedDynamicsProblem):
+        """
+        Initializes the spectral penalty `rho = sqrt(m * L) * kappa^p` of the worlds using it, from the extreme
+        eigenvalues `m` and `L` of the regularized preconditioned operator `P (D + R) P + eta I` of the problem.
+
+        The largest eigenvalue is estimated by power iteration, warm-started from the previous solve,
+        while the smallest one is bounded from below by `eta + min(P R P)`, since `D` is positive semi-definite
+        and in general singular, e.g. for hyperstatic constraint configurations.
+
+        Args:
+            problem: The forward dynamics problem to be solved.
+        """
+        # Estimate the largest eigenvalue of the operator, warm-started from the previous solve of the same problem
+        self.prepare(problem)
+        lambda_max = self._spectral_power_iteration.compute_max(world_mask=self._spectral_mask)
+
+        # Compute the lower bound of the smallest eigenvalue from the preconditioned compliance
+        self._spectral_lower_bound.fill_(FLOAT32_MAX)
+        wp.launch(
+            kernel=_compute_spectral_lower_bound,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[problem.data.dim, problem.data.vio, problem.data.P, problem.data.R, self._spectral_mask],
+            outputs=[self._spectral_lower_bound],
+            device=self.device,
+        )
+
+        # Initialize the spectral penalty and the total proximal regularization
+        wp.launch(
+            kernel=_initialize_spectral_penalty,
+            dim=self._size.num_worlds,
+            inputs=[
+                problem.data.dim,
+                self._data.config,
+                self._spectral_mask,
+                lambda_max,
+                self._spectral_lower_bound,
+            ],
+            outputs=[self._data.penalty, self._data.state.sigma],
+            device=self.device,
+        )
+
+    def _update_spectral_penalty(self, problem: ConstrainedDynamicsProblem):
+        """
+        Adapts the exponent of the spectral penalty from the current primal and dual residuals,
+        and refreshes the linear system of the problem (e.g. re-factorizes it) with the updated penalty.
+
+        Args:
+            problem: The forward dynamics problem to be solved.
+        """
+        wp.launch(
+            kernel=_update_spectral_penalty,
+            dim=self._size.num_worlds,
+            inputs=[self._data.config, self._data.status],
+            outputs=[self._data.penalty, self._data.state.sigma],
+            device=self.device,
+        )
+        wp.launch(
+            kernel=_update_problem_spectral_regularization,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[problem.data.dim, problem.data.vio, self._data.config, self._data.penalty],
+            outputs=[problem.data.eta],
+            device=self.device,
+        )
+        problem.update_regularization()
         problem.prepare_solve()
 
     def _step(self, problem: ConstrainedDynamicsProblem):

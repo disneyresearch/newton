@@ -249,10 +249,11 @@ def make_initialize_solver_kernel(use_acceleration: bool = False):
             status.num_restarts = wp.int32(0)
 
         # Initialize ALM penalty parameter and relevant meta-data
-        # NOTE: Currently only fixed penalty is used
+        # NOTE: The spectral penalty is subsequently initialized from the spectral estimates
         penalty.rho = config.rho_0
         penalty.rho_p = wp.float32(0.0)
         penalty.num_updates = wp.int32(0)
+        penalty.p = config.spectral_power_0
 
         # Initialize the total proximal regularization
         sigma[0] = config.eta + config.rho_0
@@ -353,6 +354,139 @@ def _update_problem_proximal_regularization(
 
     # Set the proximal regularization term: eta + rho
     problem_eta[vio + tid] = solver_config[wid].eta + solver_penalty[wid].rho
+
+
+@wp.func
+def _spectral_penalty(config: PADMMConfigStruct, pen: PADMMPenalty) -> wp.float32:
+    """Computes the spectral penalty `rho = sqrt(m * L) * kappa^p`, with `kappa = L / m`, clamped to the bounds."""
+    kappa = pen.L / pen.m
+    rho = wp.sqrt(pen.m * pen.L) * wp.pow(kappa, pen.p)
+    return wp.clamp(rho, config.rho_min, config.rho_max)
+
+
+@wp.kernel
+def _compute_spectral_lower_bound(
+    # Inputs:
+    problem_dim: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_P: wp.array[wp.float32],
+    problem_R: wp.array[wp.float32],
+    spectral_mask: wp.array[wp.bool],
+    # Outputs:
+    lower_bound: wp.array[wp.float32],
+):
+    # Retrieve the world and constraint indices as the thread indices
+    wid, tid = wp.tid()
+
+    # Skip if the world does not use the spectral penalty or the row index exceeds the problem size
+    if not spectral_mask[wid] or tid >= problem_dim[wid]:
+        return
+
+    # The smallest diagonal entry of the preconditioned compliance P R P bounds the smallest eigenvalue
+    # of the preconditioned compliant Delassus operator P (D + R) P from below, since D is positive semi-definite
+    r_i = wp.float32(0.0)
+    if problem_R:
+        v_i = problem_vio[wid] + tid
+        p_i = problem_P[v_i]
+        r_i = p_i * p_i * problem_R[v_i]
+    wp.atomic_min(lower_bound, wid, r_i)
+
+
+@wp.kernel
+def _initialize_spectral_penalty(
+    # Inputs:
+    problem_dim: wp.array[wp.int32],
+    solver_config: wp.array[PADMMConfigStruct],
+    spectral_mask: wp.array[wp.bool],
+    lambda_max: wp.array[wp.float32],
+    lambda_min: wp.array[wp.float32],
+    # Outputs:
+    solver_penalty: wp.array[PADMMPenalty],
+    solver_state_sigma: wp.array[wp.vec2f],
+):
+    # Retrieve the world index as the thread index
+    wid = wp.tid()
+
+    # Skip if the world does not use the spectral penalty
+    if not spectral_mask[wid]:
+        return
+
+    # Compute the extreme eigenvalues of the regularized operator, i.e. including the proximal parameter
+    config = solver_config[wid]
+    pen = solver_penalty[wid]
+    lower = wp.float32(0.0)
+    if problem_dim[wid] > 0:
+        lower = wp.clamp(lambda_min[wid], 0.0, wp.max(lambda_max[wid], 0.0))
+    pen.m = config.eta + lower
+    pen.L = wp.max(config.eta + wp.max(lambda_max[wid], 0.0), pen.m)
+
+    # Initialize the spectral penalty and the total proximal regularization
+    pen.rho = _spectral_penalty(config, pen)
+    solver_penalty[wid] = pen
+    solver_state_sigma[wid] = wp.vec2f(config.eta + pen.rho, 0.0)
+
+
+@wp.kernel
+def _update_spectral_penalty(
+    # Inputs:
+    solver_config: wp.array[PADMMConfigStruct],
+    solver_status: wp.array[PADMMStatus],
+    # Outputs:
+    solver_penalty: wp.array[PADMMPenalty],
+    solver_state_sigma: wp.array[wp.vec2f],
+):
+    # Retrieve the world index as the thread index
+    wid = wp.tid()
+
+    # Skip if the world does not use the spectral penalty or has finished iterating
+    config = solver_config[wid]
+    status = solver_status[wid]
+    if config.penalty_update_method != wp.int32(PADMMPenaltyUpdate.SPECTRAL):
+        return
+    if status.converged > 0 or status.iterations >= config.max_iterations or config.penalty_update_freq <= 0:
+        return
+
+    # Adapt the spectral exponent from the ratio of the primal and dual residuals:
+    # a dominant primal residual increases the penalty, a dominant dual residual decreases it
+    pen = solver_penalty[wid]
+    if status.r_p > config.alpha * status.r_d:
+        pen.p += config.spectral_power_inc
+    elif status.r_d > config.alpha * status.r_p:
+        pen.p -= config.spectral_power_dec
+    else:
+        return
+
+    # Update the penalty and the total proximal regularization, unless it is clamped to its bounds
+    rho = _spectral_penalty(config, pen)
+    if rho != pen.rho:
+        pen.rho_p = pen.rho
+        pen.rho = rho
+        pen.num_updates += wp.int32(1)
+        solver_state_sigma[wid] = wp.vec2f(config.eta + rho, solver_state_sigma[wid][0])
+    solver_penalty[wid] = pen
+
+
+@wp.kernel
+def _update_problem_spectral_regularization(
+    # Inputs:
+    problem_dim: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    solver_config: wp.array[PADMMConfigStruct],
+    solver_penalty: wp.array[PADMMPenalty],
+    # Outputs:
+    problem_eta: wp.array[wp.float32],
+):
+    # Retrieve the world and constraint indices as the thread indices
+    wid, tid = wp.tid()
+
+    # Skip if the row index exceeds the problem size
+    if tid >= problem_dim[wid]:
+        return
+
+    # Set the proximal regularization term: eta + rho
+    # NOTE: Unlike within the iterations, the regularization of converged worlds is retained, so that
+    # re-factorizing the regularized operator of all worlds keeps the operators of all worlds definite
+    problem_eta[problem_vio[wid] + tid] = solver_config[wid].eta + solver_penalty[wid].rho
 
 
 @wp.kernel

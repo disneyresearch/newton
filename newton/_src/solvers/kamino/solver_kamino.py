@@ -491,13 +491,16 @@ class SolverKamino(SolverBase, CouplingInterface):
                     "The DVI solver currently requires `dynamics.preconditioning=False` so convergence checks and "
                     "contact cone updates stay in physical constraint units."
                 )
+            # NOTE: The spectral penalty is updated after blocks of `penalty_update_freq` iterations,
+            # after which dense problems are re-factorized, unlike balanced penalty updates which may
+            # occur at every iteration and are thus only supported by sparse problems.
             padmm_config = self.padmm_primal if self.dynamics_solver == "padmm_primal" else self.padmm
             if (
                 self.dynamics_solver in {"padmm", "padmm_primal"}
                 and not self.sparse_dynamics
-                and padmm_config.penalty_update_method != "fixed"
+                and padmm_config.penalty_update_method == "balanced"
             ):
-                raise ValueError("Adaptive PADMM penalty updates require `sparse_dynamics=True`.")
+                raise ValueError("Balanced PADMM penalty updates require `sparse_dynamics=True`.")
             if self.dynamics_solver == "padmm_primal" and self.dynamics.linear_solver_type == "CRF":
                 raise ValueError(
                     "The primal PADMM solver does not support the 'CRF' linear solver, "

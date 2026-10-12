@@ -17,9 +17,16 @@ from newton._src.solvers.kamino._src.linalg import ConjugateResidualSolver, LLTB
 from newton._src.solvers.kamino._src.linalg.utils.matrix import SquareSymmetricMatrixProperties
 from newton._src.solvers.kamino._src.linalg.utils.range import in_range_via_gaussian_elimination
 from newton._src.solvers.kamino._src.solvers.padmm import PADMMSolver, PADMMWarmStartMode
+from newton._src.solvers.kamino._src.solvers.padmm.kernels import _update_spectral_penalty
 from newton._src.solvers.kamino._src.solvers.padmm.math import (
     project_to_coulomb_cone,
     project_to_coulomb_dual_cone,
+)
+from newton._src.solvers.kamino._src.solvers.padmm.types import (
+    PADMMConfigStruct,
+    PADMMPenalty,
+    PADMMStatus,
+    convert_config_to_struct,
 )
 from newton._src.solvers.kamino._src.utils import logger as msg
 from newton.tests.kamino import setup_tests, test_context
@@ -1088,6 +1095,172 @@ class TestPADMMSolver(unittest.TestCase):
             self.assert_coulomb_cone_projection(cone, "interior", mu, [1.0, 0.0, 2.0 * mu], [1.0, 0.0, 2.0 * mu])
             self.assert_coulomb_cone_projection(cone, "polar", mu, [1.0, 0.0, -2.0 / mu], [0.0, 0.0, 0.0])
             self.assert_coulomb_cone_projection(cone, "projection", mu, [1.0, 0.0, 0.0], [1.0 / den, 0.0, mu / den])
+
+
+class TestPADMMSpectralPenalty(unittest.TestCase):
+    def setUp(self):
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.default_device = wp.get_device(test_context.device)
+
+    def tearDown(self):
+        self.default_device = None
+
+    @staticmethod
+    def _spectral_rho(config: PADMMSolver.Config, m: float, L: float, p: float) -> float:
+        rho = np.sqrt(m * L) * (L / m) ** p
+        return float(np.clip(rho, config.rho_min, config.rho_max))
+
+    def test_01_initial_penalty_matches_spectral_rule(self):
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                test = TestSetup(
+                    builder_fn=basics.build_box_on_plane,
+                    max_world_contacts=8,
+                    device=self.default_device,
+                    sparse=sparse,
+                )
+                test.build()
+                # NOTE: The dense Delassus matrix is copied since it is regularized in-place by the solve
+                D_np = [D.copy() for D in extract_delassus(test.problem.delassus, only_active_dims=True)]
+                config = PADMMSolver.Config(
+                    penalty_update_method="spectral",
+                    penalty_update_freq=0,
+                    max_iterations=1,
+                    spectral_max_iterations=500,
+                    spectral_tolerance=1e-7,
+                )
+                solver = PADMMSolver(model=test.model, config=config, use_graph_conditionals=False)
+                solver.coldstart()
+                solver.solve(problem=test.problem)
+
+                # Without compliance, the smallest eigenvalue is bounded from below by the proximal parameter
+                penalty = solver.data.penalty.numpy()
+                for w, D in enumerate(D_np):
+                    L = np.linalg.eigvalsh(D.astype(np.float64))[-1] + config.eta
+                    np.testing.assert_allclose(penalty[w]["m"], config.eta, rtol=1e-6)
+                    np.testing.assert_allclose(penalty[w]["L"], L, rtol=1e-3)
+                    np.testing.assert_allclose(penalty[w]["p"], config.spectral_power_0, rtol=1e-6)
+                    expected_rho = self._spectral_rho(config, config.eta, L, config.spectral_power_0)
+                    np.testing.assert_allclose(penalty[w]["rho"], expected_rho, rtol=2e-3)
+                    np.testing.assert_allclose(solver.data.state.sigma.numpy()[w][0], config.eta + penalty[w]["rho"])
+
+    def test_02_spectral_exponent_update_rule(self):
+        """Checks the adaptation of the spectral exponent from the ratio of the primal and dual residuals."""
+        config = PADMMSolver.Config(
+            penalty_update_method="spectral",
+            alpha=10.0,
+            spectral_power_inc=0.05,
+            spectral_power_dec=0.1,
+            max_iterations=100,
+        )
+        cases = (
+            # (r_p, r_d, converged, expected change of p)
+            (1.0, 1e-2, 0, 0.05),
+            (1e-2, 1.0, 0, -0.1),
+            (1.0, 0.5, 0, 0.0),
+            (1.0, 1e-2, 1, 0.0),
+        )
+        device = self.default_device
+        num_worlds = len(cases)
+        configs = wp.array([convert_config_to_struct(config)] * num_worlds, dtype=PADMMConfigStruct, device=device)
+        statuses, penalties = [], []
+        for r_p, r_d, converged, _ in cases:
+            status = PADMMStatus()
+            status.r_p, status.r_d, status.converged, status.iterations = r_p, r_d, converged, 10
+            statuses.append(status)
+            penalty = PADMMPenalty()
+            penalty.p, penalty.m, penalty.L = 0.2, 1e-5, 4.0
+            penalty.rho = self._spectral_rho(config, 1e-5, 4.0, 0.2)
+            penalties.append(penalty)
+        status = wp.array(statuses, dtype=PADMMStatus, device=device)
+        penalty = wp.array(penalties, dtype=PADMMPenalty, device=device)
+        sigma = wp.zeros(num_worlds, dtype=wp.vec2f, device=device)
+        wp.launch(_update_spectral_penalty, dim=num_worlds, inputs=[configs, status], outputs=[penalty, sigma])
+        penalty_np = penalty.numpy()
+        for w, (*_, dp) in enumerate(cases):
+            p = 0.2 + dp
+            np.testing.assert_allclose(penalty_np[w]["p"], p, rtol=1e-6)
+            np.testing.assert_allclose(penalty_np[w]["rho"], self._spectral_rho(config, 1e-5, 4.0, p), rtol=1e-5)
+            self.assertEqual(penalty_np[w]["num_updates"], int(dp != 0.0))
+
+    def test_03_penalty_updates_follow_block_frequency(self):
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                test = TestSetup(
+                    builder_fn=basics.build_box_on_plane,
+                    max_world_contacts=8,
+                    device=self.default_device,
+                    sparse=sparse,
+                )
+                test.build()
+                config = PADMMSolver.Config(
+                    penalty_update_method="spectral",
+                    penalty_update_freq=5,
+                    primal_tolerance=0.0,
+                    dual_tolerance=0.0,
+                    compl_tolerance=0.0,
+                    max_iterations=23,
+                )
+                solver = PADMMSolver(model=test.model, config=config, use_graph_conditionals=False)
+                solver.coldstart()
+                solver.solve(problem=test.problem)
+
+                # The penalty is updated at most once per block of iterations
+                status = solver.data.status.numpy()[0]
+                penalty = solver.data.penalty.numpy()[0]
+                num_blocks = config.max_iterations // config.penalty_update_freq
+                self.assertEqual(status["iterations"], config.max_iterations)
+                self.assertLessEqual(penalty["num_updates"], num_blocks)
+                steps = (penalty["p"] - config.spectral_power_0) / config.spectral_power_inc
+                self.assertLessEqual(abs(steps), num_blocks + 1e-3)
+                expected_rho = self._spectral_rho(config, penalty["m"], penalty["L"], penalty["p"])
+                np.testing.assert_allclose(penalty["rho"], expected_rho, rtol=1e-5)
+
+                # The regularization of the problem holds the final penalty
+                eta = test.problem.data.eta.numpy()[: test.data.info.num_total_cts.numpy()[0]]
+                np.testing.assert_allclose(eta, config.eta + penalty["rho"], rtol=1e-6)
+
+    def test_04_spectral_solve_converges(self):
+        for sparse in (False, True):
+            for use_acceleration in (False, True):
+                with self.subTest(sparse=sparse, use_acceleration=use_acceleration):
+                    test = TestSetup(
+                        builder_fn=basics.build_box_on_plane,
+                        max_world_contacts=8,
+                        device=self.default_device,
+                        sparse=sparse,
+                    )
+                    test.build()
+                    # NOTE: The spectral rule only adapts the penalty to the ratio of the primal and dual
+                    # residuals, so the complementarity residual may stagnate once both have converged
+                    config = PADMMSolver.Config(
+                        penalty_update_method="spectral",
+                        penalty_update_freq=10,
+                        compl_tolerance=1e-5,
+                        max_iterations=2000,
+                    )
+                    solver = PADMMSolver(
+                        model=test.model,
+                        config=config,
+                        use_acceleration=use_acceleration,
+                        use_graph_conditionals=False,
+                    )
+                    solver.coldstart()
+                    solver.solve(problem=test.problem)
+                    status = solver.data.status.numpy()[0]
+                    self.assertTrue(bool(status["converged"]), msg=f"status: {status}")
+                    self.assertLessEqual(status["r_p"], config.primal_tolerance)
+                    self.assertLessEqual(status["r_d"], config.dual_tolerance)
+                    self.assertLessEqual(status["r_c"], config.compl_tolerance)
+
+                    # The solution satisfies the constraint-space dynamics: v_plus = D lambda + v_f
+                    problem = test.problem
+                    v_plus = wp.zeros_like(solver.data.solution.v_plus)
+                    problem.gemv(x=solver.data.solution.lambdas, y=v_plus, preconditioned=False)
+                    n = test.data.info.num_total_cts.numpy()[0]
+                    v_plus_ref = (v_plus.numpy() + problem.data.v_f.numpy() / problem.data.P.numpy())[:n]
+                    np.testing.assert_allclose(solver.data.solution.v_plus.numpy()[:n], v_plus_ref, atol=1e-4)
 
 
 ###
