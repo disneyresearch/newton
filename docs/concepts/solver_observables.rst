@@ -94,7 +94,8 @@ the pipeline for the backend's export capacity:
 
 There is no ``pipeline.collide()`` call in this mode: the solver fills contact
 geometry and forces. Native Kamino similarly seeds the model's rigid capacity
-when constructed before the pipeline. Both backends reject insufficient
+when constructed before the pipeline, and caps its own capacity at the model's
+rigid capacity when that is already set. Both backends reject insufficient
 pipeline capacity during contact-observable allocation instead of resizing arrays
 inside a step.
 

@@ -98,6 +98,45 @@ Both support dense and sparse operators and bilateral Schur elimination.
 See the :class:`~newton.solvers.SolverKamino` configuration reference for
 subsolver selection and iteration controls.
 
+Contact capacity
+----------------
+
+Kamino allocates its contact buffers once, when the solver is constructed, with
+a fixed capacity for each world. The same rule applies to PADMM and DVI, and to
+both contact sources: Kamino's internal collision detection
+(``use_collision_detector=True``) and contacts from a
+:class:`~newton.CollisionPipeline`.
+
+By default, the capacity of a world is the sum of the per-shape-pair contact
+limits of its colliding shape pairs, capped at the larger of 1000 and a
+neighbor-count estimate for that world that uses the same contact weights as the
+:class:`~newton.CollisionPipeline` capacity estimate. Two settings of
+``config.collision_detector`` override this default:
+
+* ``max_contacts_per_world`` gives every world exactly this capacity. Use it to
+  bound memory in contact-rich scenes; ``0`` allocates no contacts.
+* ``max_contacts`` caps the total. The per-world capacities are scaled down
+  proportionally so that they sum to at most this value.
+
+.. code-block:: python
+
+   config = newton.solvers.SolverKamino.Config(use_collision_detector=True)
+   config.collision_detector.max_contacts_per_world = 64
+   solver = newton.solvers.SolverKamino(model, config=config)
+
+``Model.rigid_contact_max`` links this capacity to Newton's contact buffers. If
+it is ``None`` when the solver is constructed, Kamino sets it to its own total,
+so a :class:`~newton.CollisionPipeline` created afterwards allocates a matching
+buffer. If it is already set, by the user or by an existing pipeline, Kamino
+treats it as an upper bound: the per-world capacities are scaled down to fit,
+and a warning reports the reduction. Construct the solver before the pipeline to
+keep Kamino's full capacity, or set ``model.rigid_contact_max`` explicitly to
+choose one memory budget for both.
+
+When a step generates more contacts than a world can hold, Kamino keeps the
+contacts that fit, drops the rest, and prints a warning for that step. Raise
+``max_contacts_per_world`` if this happens regularly.
+
 Inspecting terminal status
 --------------------------
 

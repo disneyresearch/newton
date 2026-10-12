@@ -1,0 +1,1 @@
+Reserve 255 contacts, the most that Newton's contact reduction keeps for one shape pair, for each `SolverKamino` shape pair that involves a mesh or heightfield, instead of 32 or 64. Convex-mesh pairs keep their previous limits. Set `config.collision_detector.max_contacts_per_world` to bound memory in mesh-heavy scenes.

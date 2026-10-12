@@ -123,8 +123,9 @@ class CollisionDetectorConfig(ConfigBase):
     Applies to both internal collision detection and contacts converted from a
     Newton ``CollisionPipeline``.\n
     Defaults to ``None``, which sizes each world from its geometry: the sum of
-    its per-shape-pair contact limits, capped at the larger of 1000 and the
-    ``CollisionPipeline`` estimate for that world.
+    its per-shape-pair contact limits, capped at the larger of 1000 and a
+    neighbor-count estimate for that world that uses the ``CollisionPipeline``
+    contact weights.
     """
 
     max_contacts_per_pair: int | None = None
