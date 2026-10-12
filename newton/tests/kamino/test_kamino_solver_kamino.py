@@ -3,6 +3,7 @@
 
 """Unit tests for the :class:`SolverKaminoImpl` class"""
 
+import math
 import time
 import unittest
 import warnings
@@ -448,6 +449,10 @@ class TestSolverKaminoConfig(unittest.TestCase):
         for kwargs in (
             {"spectral_power_inc": -0.1},
             {"spectral_power_dec": -0.1},
+            {"spectral_power_0": 0.6},
+            {"spectral_power_0": -0.1},
+            {"spectral_power_min": -math.inf},
+            {"spectral_power_min": 0.3, "spectral_power_max": 0.1},
             {"spectral_max_iterations": 0},
             {"spectral_tolerance": -1.0},
             {"spectral_min_eigenvalue": "lanczos"},

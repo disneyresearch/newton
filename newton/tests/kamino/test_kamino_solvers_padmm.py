@@ -1299,6 +1299,47 @@ class TestPADMMSpectralPenalty(unittest.TestCase):
                     v_plus_ref = (v_plus.numpy() + problem.data.v_f.numpy() / problem.data.P.numpy())[:n]
                     np.testing.assert_allclose(solver.data.solution.v_plus.numpy()[:n], v_plus_ref, atol=1e-4)
 
+    def test_06_spectral_exponent_bounds(self):
+        """Checks that the spectral exponent is bounded, and does not wind up beyond a clamped penalty."""
+        m, L = 1e-5, 4.0
+        common = {"penalty_update_method": "spectral", "alpha": 10.0, "max_iterations": 100}
+        bounded = PADMMSolver.Config(**common)
+        clamped = PADMMSolver.Config(rho_min=1.0, **common)
+        cases = (
+            # (config, initial p, r_p, r_d, expected p)
+            (bounded, 0.48, 1.0, 1e-2, bounded.spectral_power_max),
+            (bounded, bounded.spectral_power_max, 1.0, 1e-2, bounded.spectral_power_max),
+            (bounded, 0.02, 1e-2, 1.0, bounded.spectral_power_min),
+            (bounded, bounded.spectral_power_min, 1e-2, 1.0, bounded.spectral_power_min),
+            (clamped, 0.2, 1e-2, 1.0, 0.2),
+        )
+        self.assertGreater(clamped.rho_min, self._spectral_rho(bounded, m, L, 0.2))
+        device = self.default_device
+        num_worlds = len(cases)
+        configs = wp.array(
+            [convert_config_to_struct(config) for config, *_ in cases], dtype=PADMMConfigStruct, device=device
+        )
+        statuses, penalties = [], []
+        for config, p, r_p, r_d, _ in cases:
+            status = PADMMStatus()
+            status.r_p, status.r_d, status.iterations = r_p, r_d, 10
+            statuses.append(status)
+            penalty = PADMMPenalty()
+            penalty.p, penalty.m, penalty.L = p, m, L
+            penalty.rho = self._spectral_rho(config, m, L, p)
+            penalties.append(penalty)
+        status = wp.array(statuses, dtype=PADMMStatus, device=device)
+        penalty = wp.array(penalties, dtype=PADMMPenalty, device=device)
+        sigma = wp.zeros(num_worlds, dtype=wp.vec2f, device=device)
+        wp.launch(_update_spectral_penalty, dim=num_worlds, inputs=[configs, status], outputs=[penalty, sigma])
+        penalty_np = penalty.numpy()
+        for w, (config, p_0, _, _, p) in enumerate(cases):
+            with self.subTest(world=w):
+                rho = self._spectral_rho(config, m, L, p)
+                np.testing.assert_allclose(penalty_np[w]["p"], p, rtol=1e-6)
+                np.testing.assert_allclose(penalty_np[w]["rho"], rho, rtol=1e-5)
+                self.assertEqual(penalty_np[w]["num_updates"], int(rho != self._spectral_rho(config, m, L, p_0)))
+
 
 def project_to_dual_cone_reference(x: np.ndarray, mu: float) -> np.ndarray:
     """Projects a 3D vector (normal last) onto the dual of the Coulomb friction cone of coefficient `mu`."""

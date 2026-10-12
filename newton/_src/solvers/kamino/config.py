@@ -696,7 +696,8 @@ class PADMMSolverConfig:
       `kappa = L / m`, which are estimated at the beginning of each solve (see
       `spectral_max_iterations` and `spectral_min_eigenvalue`). The exponent `p` starts
       at `spectral_power_0` and is adapted from the residual ratio w.r.t. `alpha` (see
-      `spectral_power_inc` and `spectral_power_dec`). The initial penalty `rho_0` is ignored.\n
+      `spectral_power_inc` and `spectral_power_dec`), within `[spectral_power_min, spectral_power_max]`.
+      The initial penalty `rho_0` is ignored.\n
     Defaults to `fixed`. See :class:`PADMMPenaltyUpdate` for details.
     """
 
@@ -718,6 +719,21 @@ class PADMMSolverConfig:
     The decrement of the exponent `p` of the `spectral` penalty, applied when the dual
     residual exceeds `alpha` times the primal residual, which decreases the penalty.\n
     Must be non-negative. Defaults to `0.05`.
+    """
+
+    spectral_power_min: float = 0.0
+    """
+    The lower bound of the exponent `p` of the `spectral` penalty, i.e. `rho >= sqrt(m * L)` by default.\n
+    The lower bound limits the condition number of the regularized operator, e.g. to `1 + sqrt(kappa)`
+    by default, which keeps its single-precision factorization accurate for hyperstatic (i.e. rank-deficient)
+    rigid constraint configurations, whose smallest eigenvalue `m` is the proximal parameter `eta`.\n
+    Must not exceed `spectral_power_0`. Defaults to `0.0`.
+    """
+
+    spectral_power_max: float = 0.5
+    """
+    The upper bound of the exponent `p` of the `spectral` penalty, i.e. `rho <= L` by default.\n
+    Must not be less than `spectral_power_0`. Defaults to `0.5`.
     """
 
     spectral_max_iterations: int = 20
@@ -1010,6 +1026,15 @@ class PADMMSolverConfig:
             raise ValueError(f"Invalid spectral power increment: {self.spectral_power_inc}. Must be non-negative.")
         if self.spectral_power_dec < 0.0:
             raise ValueError(f"Invalid spectral power decrement: {self.spectral_power_dec}. Must be non-negative.")
+        if not math.isfinite(self.spectral_power_min) or not math.isfinite(self.spectral_power_max):
+            raise ValueError(
+                f"Invalid spectral power bounds: [{self.spectral_power_min}, {self.spectral_power_max}]. Must be finite."
+            )
+        if not self.spectral_power_min <= self.spectral_power_0 <= self.spectral_power_max:
+            raise ValueError(
+                f"Invalid initial spectral power: {self.spectral_power_0}. Must be in the range "
+                f"[spectral_power_min, spectral_power_max] = [{self.spectral_power_min}, {self.spectral_power_max}]."
+            )
         if self.spectral_max_iterations <= 0:
             raise ValueError(
                 f"Invalid spectral max iterations: {self.spectral_max_iterations}. Must be a positive integer."
@@ -1063,7 +1088,8 @@ class PADMMPrimalSolverConfig(PADMMSolverConfig):
     - The `spectral` penalty is `rho = kappa^{-p} / sqrt(m * L)`, i.e. the inverse of the dual
       spectral penalty, whose exponent `p` is increased by `spectral_power_inc` when the dual
       residual exceeds `alpha` times the primal residual (which decreases `rho`), and decreased by
-      `spectral_power_dec` in the opposite case. The parameters are thus shared with the dual one.
+      `spectral_power_dec` in the opposite case. The parameters are thus shared with the dual one,
+      e.g. the default exponent bounds yield `1 / L <= rho <= 1 / sqrt(m * L)`.
     """
 
     rho_min: float = 0.0

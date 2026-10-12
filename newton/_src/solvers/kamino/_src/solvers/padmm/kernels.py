@@ -582,24 +582,28 @@ def _update_spectral_penalty(
     if status.converged > 0 or status.iterations >= config.max_iterations or config.penalty_update_freq <= 0:
         return
 
-    # Adapt the spectral exponent from the ratio of the primal and dual residuals:
+    # Adapt the spectral exponent from the ratio of the primal and dual residuals within its bounds:
     # a dominant primal residual increases the penalty, a dominant dual residual decreases it
     pen = solver_penalty[wid]
+    p = pen.p
     if status.r_p > config.alpha * status.r_d:
-        pen.p += config.spectral_power_inc
+        p = wp.min(p + config.spectral_power_inc, config.spectral_power_max)
     elif status.r_d > config.alpha * status.r_p:
-        pen.p -= config.spectral_power_dec
-    else:
+        p = wp.max(p - config.spectral_power_dec, config.spectral_power_min)
+    if p == pen.p:
         return
 
-    # Update the penalty and the total proximal regularization, unless it is clamped to its bounds
+    # Update the exponent, the penalty, and the total proximal regularization, unless the penalty
+    # is clamped to its bounds, so that the exponent does not wind up beyond the clamped penalty
+    pen.p = p
     rho = _spectral_penalty(config, pen)
-    if rho != pen.rho:
-        pen.rho_p = pen.rho
-        pen.rho = rho
-        pen.num_updates += wp.int32(1)
-        solver_state_sigma[wid] = wp.vec2f(config.eta + rho, solver_state_sigma[wid][0])
+    if rho == pen.rho:
+        return
+    pen.rho_p = pen.rho
+    pen.rho = rho
+    pen.num_updates += wp.int32(1)
     solver_penalty[wid] = pen
+    solver_state_sigma[wid] = wp.vec2f(config.eta + rho, solver_state_sigma[wid][0])
 
 
 @wp.kernel
