@@ -29,11 +29,16 @@ from newton.tests.utils import basics
 _UNIT_INERTIA = wp.mat33(1.0, 0.0, 0.0, 0.0, 1.0, 0.0, 0.0, 0.0, 1.0)
 
 
-def _make_nunchaku_worlds(device: wp.DeviceLike, world_count: int) -> ModelKamino:
-    """Build ``world_count`` replicated boxes-nunchaku worlds."""
+def _make_nunchaku_newton_model(device: wp.DeviceLike, world_count: int) -> newton.Model:
+    """Build a Newton model of ``world_count`` replicated boxes-nunchaku worlds."""
     builder = newton.ModelBuilder()
     builder.replicate(builder=basics.build_boxes_nunchaku(), world_count=world_count)
-    return ModelKamino.from_newton(builder.finalize(device=device))
+    return builder.finalize(device=device)
+
+
+def _make_nunchaku_worlds(device: wp.DeviceLike, world_count: int) -> ModelKamino:
+    """Build a Kamino model of ``world_count`` replicated boxes-nunchaku worlds."""
+    return ModelKamino.from_newton(_make_nunchaku_newton_model(device, world_count))
 
 
 def _make_box_worlds(device: wp.DeviceLike, box_counts: list[int]) -> ModelKamino:
@@ -250,6 +255,27 @@ class TestContactCapacityResolve(unittest.TestCase):
         model = _make_box_worlds(self.default_device, [2, 3])
         # Each box adds 20 neighbors x 5 contacts / 2 = 50, and the global plane adds 5 per box.
         self.assertEqual(_world_neighbor_bounds(model), [2 * 50 + 2 * 5, 3 * 50 + 3 * 5])
+
+
+class TestConversionMetadataInvariance(unittest.TestCase):
+    """Verify that the Kamino pair bounds depend only on the model geometry."""
+
+    def setUp(self):
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.default_device = wp.get_device(test_context.device)
+
+    def test_pair_metadata_ignores_preset_rigid_contact_max(self):
+        """Derive the pair bounds from geometry even when the Newton model already has a contact capacity."""
+        base = ModelKamino.from_newton(_make_nunchaku_newton_model(self.default_device, world_count=3))
+
+        primed_newton_model = _make_nunchaku_newton_model(self.default_device, world_count=3)
+        primed_newton_model.rigid_contact_max = 12345
+        primed = ModelKamino.from_newton(primed_newton_model)
+
+        self.assertEqual(list(primed.geoms.world_minimum_contacts), list(base.geoms.world_minimum_contacts))
+        self.assertEqual(primed.geoms.model_minimum_contacts, base.geoms.model_minimum_contacts)
+        self.assertEqual(primed.geoms.model_minimum_contacts, sum(primed.geoms.world_minimum_contacts))
 
 
 ###

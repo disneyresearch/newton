@@ -60,12 +60,13 @@ class GeometriesModel:
     """Total number of excluded geometry pairs in the model (host-side)."""
 
     model_minimum_contacts: int = 0
-    """The minimum number of contacts required for the entire model (host-side)."""
+    """The pair bound of the entire model, i.e. the sum of `world_minimum_contacts` (host-side)."""
 
     world_minimum_contacts: list[int] | None = None
     """
-    List of the minimum number of contacts required for each world in the model (host-side).
-    The sum of all elements in `world_minimum_contacts` should equal `model_minimum_contacts`.
+    The pair bound of each world in the model (host-side), i.e. the sum of the per-pair
+    contact limits given by :func:`max_contacts_for_shape_pair` over the shape pairs of the world.
+    It depends only on the model geometry, and its sum always equals `model_minimum_contacts`.
     """
 
     label: list[str] | None = None
