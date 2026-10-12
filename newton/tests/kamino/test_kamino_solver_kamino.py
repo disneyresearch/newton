@@ -453,14 +453,21 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertEqual(solver._contacts_kamino.model_max_contacts_host, pipeline.rigid_contact_max)
 
     def test_capacity_allocation_for_pipeline_allocated_before_kamino(self):
-        """Verify capacity allocation for a pipeline allocated before Kamino."""
+        """Verify a pipeline created before Kamino only caps Kamino's geometric budget.
+
+        The pipeline publishes Newton's estimate of 1000 rigid contacts, while each
+        sphere-on-plane world can produce at most one contact, so Kamino keeps its
+        budget of three contacts and leaves the published capacity unchanged.
+        """
         model = self._make_three_world_model()
 
         pipeline = newton.CollisionPipeline(model)
         solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=False))
 
-        # Kamino's capacity should be at least as large as the pipeline's capacity. Due to rounding up to the nearest multiple of the world count.
-        self.assertGreaterEqual(solver._contacts_kamino.model_max_contacts_host, pipeline.rigid_contact_max)
+        budget = ContactCapacity.resolve_from(solver._model_kamino).model_max_contacts
+        self.assertEqual(budget, 3)
+        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, min(pipeline.rigid_contact_max, budget))
+        self.assertEqual(model.rigid_contact_max, pipeline.rigid_contact_max)
 
     def test_internal_collision_capacity_updates_model(self):
         """Verify internal collision capacity updates the Newton model."""
@@ -610,15 +617,15 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertTrue(any("Falling back to the 'euler' integrator" in message for message in logs.output))
 
     def test_external_collisions_preserve_explicit_rigid_contact_max(self):
-        """Verify external collisions preserve an explicit contact capacity."""
+        """Verify an explicit Newton contact capacity stays untouched and caps without inflating Kamino."""
         model = self._make_three_world_model()
         model.rigid_contact_max = 1000
 
         solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=False))
 
         self.assertEqual(model.rigid_contact_max, 1000)
-        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [334, 334, 334])
-        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 1002)
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1, 1, 1])
+        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 3)
 
         contacts = newton.CollisionPipeline(model).contacts()
         with warnings.catch_warnings(), self.assertNoLogs(level="WARNING"):
@@ -692,6 +699,97 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         state_out = model.state()
         solver.step(state_in, state_out, None, None, dt=1.0 / 60.0)
 
+    def _make_box_worlds_model(self, box_counts: list[int]) -> newton.Model:
+        """Build one world per entry of ``box_counts`` above a shared global ground plane."""
+        builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+        SolverKamino.register_custom_attributes(builder)
+        builder.add_ground_plane()
+        for count in box_counts:
+            builder.begin_world()
+            for index in range(count):
+                body = builder.add_body(xform=wp.transform(wp.vec3(2.0 * index, 0.0, 0.5), wp.quat_identity()))
+                builder.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
+            builder.end_world()
+        return builder.finalize(device=self.default_device)
+
+    def test_capacity_parity_across_modes_and_solvers(self):
+        """Verify internal PADMM, internal DVI, and external contacts resolve the same contact capacity."""
+        configs = {
+            "padmm_internal": {"dynamics_solver": "padmm", "use_collision_detector": True},
+            "dvi_internal": {"dynamics_solver": "dvi", "use_collision_detector": True},
+            "external": {"use_collision_detector": False},
+        }
+        for name, kwargs in configs.items():
+            with self.subTest(mode=name):
+                model = self._make_box_worlds_model([16, 1])
+                solver = SolverKamino(model, config=SolverKamino.Config(**kwargs))
+                self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1000, 4])
+                self.assertEqual(model.rigid_contact_max, 1004)
+
+    def test_rigid_contact_max_published_only_when_unset(self):
+        """Verify Kamino publishes its total only when Newton has no capacity, and otherwise treats it as a cap."""
+        for use_collision_detector in (True, False):
+            with self.subTest(use_collision_detector=use_collision_detector):
+                model = self._make_three_world_model()
+                self.assertIsNone(model.rigid_contact_max)
+                solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=use_collision_detector))
+                self.assertEqual(model.rigid_contact_max, 3)
+                self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 3)
+
+                model = self._make_three_world_model()
+                model.rigid_contact_max = 2
+                with self.assertLogs(level="WARNING"):
+                    solver = SolverKamino(
+                        model, config=SolverKamino.Config(use_collision_detector=use_collision_detector)
+                    )
+                self.assertEqual(model.rigid_contact_max, 2)
+                self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 2)
+
+    def test_existing_pipeline_capacity_caps_internal_detector(self):
+        """Verify a smaller existing pipeline capacity caps internal detection so contact export still fits."""
+        model = self._make_three_world_model()
+        pipeline = newton.CollisionPipeline(model, rigid_contact_max=2)
+
+        solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=True))
+        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 2)
+        self.assertEqual(model.rigid_contact_max, 2)
+
+        observables = solver.observables({newton.solvers.SolverObservableFlags.CONTACT_F})
+        state_in = model.state()
+        state_out = model.state()
+        solver.step(state_in, state_out, None, pipeline.contacts(), SIM_DT, observables=observables)
+        self.assertTrue(np.all(np.isfinite(observables.contact_f.numpy())))
+
+    def test_external_zero_capacity_steps(self):
+        """Verify external contacts with zero Kamino capacity allocate nothing and still step."""
+        model = self._make_three_world_model()
+        config = SolverKamino.Config(
+            use_collision_detector=False,
+            collision_detector=kamino_config.CollisionDetectorConfig(max_contacts_per_world=0),
+        )
+        solver = SolverKamino(model, config=config)
+        self.assertIsNone(solver._contacts_kamino)
+        self.assertEqual(model.rigid_contact_max, 0)
+
+        pipeline = newton.CollisionPipeline(model)
+        contacts = pipeline.contacts()
+        state_in = model.state()
+        state_out = model.state()
+        pipeline.collide(state_in, contacts)
+        solver.step(state_in, state_out, None, contacts, SIM_DT)
+        solver.step(state_out, state_in, None, None, SIM_DT)
+        self.assertTrue(np.all(np.isfinite(state_in.body_q.numpy())))
+
+    def test_dvi_detector_config_defaults_when_enabled_late(self):
+        """Verify enabling internal detection after constructing a DVI config uses the default detector config."""
+        model = self._make_three_world_model()
+        config = SolverKamino.Config(dynamics_solver="dvi")
+        config.use_collision_detector = True
+
+        solver = SolverKamino(model, config=config)
+        self.assertIsNotNone(solver._collision_detector_kamino)
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1, 1, 1])
+
 
 class TestConstraintFreeWorlds(unittest.TestCase):
     """Verify that worlds without joint, limit, or contact rows construct and step."""
@@ -739,6 +837,37 @@ class TestConstraintFreeWorlds(unittest.TestCase):
                 gravity_z = float(model.gravity.numpy()[0][2])
                 self.assertTrue(np.all(np.isfinite(body_qd)))
                 np.testing.assert_allclose(body_qd[0, 2], gravity_z * SIM_DT, rtol=1.0e-4)
+
+    def test_mixed_contact_and_constraint_free_worlds_step(self):
+        """Step a world with contacts next to a world without any constraint rows."""
+        for dynamics_solver in ("padmm", "dvi"):
+            with self.subTest(dynamics_solver=dynamics_solver):
+                builder = newton.ModelBuilder(up_axis=newton.Axis.Z)
+                SolverKamino.register_custom_attributes(builder)
+                builder.add_ground_plane()
+                builder.begin_world()
+                body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()))
+                builder.add_shape_box(body, hx=0.5, hy=0.5, hz=0.5)
+                builder.end_world()
+                builder.begin_world()
+                builder.add_body(
+                    xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()), mass=1.0, inertia=UNIT_INERTIA
+                )
+                builder.end_world()
+                model = builder.finalize(device=self.default_device)
+
+                config = SolverKamino.Config(dynamics_solver=dynamics_solver, use_collision_detector=True)
+                solver = SolverKamino(model, config=config)
+                self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [4, 0])
+
+                state_in = model.state()
+                state_out = model.state()
+                solver.step(state_in, state_out, control=None, contacts=None, dt=SIM_DT)
+
+                body_qd = state_out.body_qd.numpy()
+                gravity_z = float(model.gravity.numpy()[0][2])
+                self.assertTrue(np.all(np.isfinite(body_qd)))
+                np.testing.assert_allclose(body_qd[1, 2], gravity_z * SIM_DT, rtol=1.0e-4)
 
 
 class TestSolverKaminoStatus(unittest.TestCase):

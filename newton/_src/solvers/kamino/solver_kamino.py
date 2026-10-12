@@ -10,7 +10,7 @@ from __future__ import annotations
 
 import warnings
 from collections.abc import Iterable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from enum import Enum
 from typing import TYPE_CHECKING, Any, Literal
 
@@ -18,7 +18,6 @@ import numpy as np
 import warp as wp
 
 from ...core.types import override
-from ...geometry.types import GeoType
 from ...sim import (
     Contacts,
     Control,
@@ -28,13 +27,6 @@ from ...sim import (
     ModelFlags,
     State,
     StateFlags,
-)
-from ...sim.collide import (
-    _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE,
-    _RIGID_CONTACT_MIN_CAPACITY,
-    _RIGID_CONTACTS_PER_MESH_PAIR,
-    _RIGID_CONTACTS_PER_PRIMITIVE_PAIR,
-    _estimate_rigid_contact_max,
 )
 from ..coupled.interface import CouplingInterface
 from ..observables import SolverObservableFlags, SolverObservables
@@ -57,52 +49,6 @@ if TYPE_CHECKING:
 ###
 
 __all__ = ["SolverKamino"]
-
-
-def _estimate_dvi_contacts_per_world(model, newton_model: Model) -> int:
-    """Estimate DVI contact capacity using the collision pipeline's weights."""
-    theoretical = max(model.geoms.world_minimum_contacts, default=0)
-    if model.size.num_worlds == 1:
-        heuristic = _estimate_rigid_contact_max(newton_model)
-        return min(theoretical, heuristic) if theoretical > 0 else heuristic
-
-    world_count = model.size.num_worlds
-    geom_world = model.geoms.wid.numpy()
-    geom_group = model.geoms.group.numpy()
-    geom_type = model.geoms.type.numpy()
-    collidable = geom_group > 0
-    if not np.any(collidable):
-        return 0
-
-    mesh = collidable & (
-        (geom_type == int(GeoType.MESH)) | (geom_type == int(GeoType.CONVEX_MESH)) | (geom_type == int(GeoType.HFIELD))
-    )
-    plane = collidable & (geom_type == int(GeoType.PLANE))
-    non_plane = collidable & ~plane
-    local = collidable & (geom_world >= 0)
-
-    def count_per_world(mask: np.ndarray) -> np.ndarray:
-        global_count = np.count_nonzero(mask & (geom_world < 0))
-        local_worlds = geom_world[mask & local]
-        return np.bincount(local_worlds, minlength=world_count) + global_count
-
-    non_plane_count = count_per_world(non_plane)
-    mesh_count = count_per_world(mesh)
-    primitive_count = non_plane_count - mesh_count
-    plane_count = count_per_world(plane)
-    non_plane_contacts = (
-        primitive_count * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR
-        + mesh_count * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE * _RIGID_CONTACTS_PER_MESH_PAIR
-    ) // 2
-    plane_contacts = plane_count * (
-        primitive_count * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR + mesh_count * _RIGID_CONTACTS_PER_MESH_PAIR
-    )
-    max_world_contacts = max(
-        _RIGID_CONTACT_MIN_CAPACITY,
-        int(np.max(non_plane_contacts + plane_contacts)),
-    )
-
-    return min(theoretical, max_world_contacts) if theoretical > 0 else max_world_contacts
 
 
 ###
@@ -800,47 +746,33 @@ class SolverKamino(SolverBase, CouplingInterface):
         # Scratch scalar for material update validation
         self._material_update_conflict = wp.empty(1, dtype=wp.int32, device=model.device)
 
+        # Resolve the contact capacity once, with the same rule for internal and external contacts.
+        # A known Newton capacity caps it, and otherwise Kamino publishes its total so that a
+        # CollisionPipeline created later allocates a matching Newton contact buffer.
+        collision_config = self._config.collision_detector or self._kamino.CollisionDetector.Config()
+        contact_capacity = self._kamino.ContactCapacity.resolve_from(
+            self._model_kamino,
+            config=collision_config,
+            rigid_contact_max=model.rigid_contact_max,
+        )
+        if model.rigid_contact_max is None:
+            model.rigid_contact_max = contact_capacity.model_max_contacts
+
         # Create a collision detector if enabled in the config, otherwise
-        # set to `None` to disable internal collision detection in Kamino
+        # set to `None` to disable internal collision detection in Kamino.
+        # The contacts container is `None` if no contacts are possible.
         self._collision_detector_kamino = None
+        self._contacts_kamino = None
         if self._config.use_collision_detector:
-            collision_config = self._config.collision_detector
-            if self._config.dynamics_solver == "dvi" and collision_config.max_contacts_per_world is None:
-                collision_config = replace(
-                    collision_config,
-                    max_contacts_per_world=_estimate_dvi_contacts_per_world(self._model_kamino, self.model),
-                )
             self._collision_detector_kamino = self._kamino.CollisionDetector(
                 model=self._model_kamino,
                 config=collision_config,
+                capacity=contact_capacity,
             )
-
-        # Capture a reference to the contacts container
-        self._contacts_kamino = None
-        if self._collision_detector_kamino is not None:
             self._contacts_kamino = self._collision_detector_kamino.contacts
-            # Keep Newton's externally allocated contact buffer in sync with Kamino.
-            # The contacts container is `None` if no contacts are possible.
-            native_contact_max = (
-                self._contacts_kamino.model_max_contacts_host if self._contacts_kamino is not None else 0
-            )
-            if not model._contact_capacity_initialized:
-                model.rigid_contact_max = native_contact_max
-        else:
-            # If collision detector is disabled allocate contacts based on the capacity estimate from the Newton CollisionPipeline.
-            world_count = self.model.world_count
-            if self.model.rigid_contact_max is None or (
-                self.model.rigid_contact_max == 0 and not self.model._contact_capacity_initialized
-            ):
-                estimated_contacts = _estimate_rigid_contact_max(model)
-                # Write back to the model to ensure the CollisionPipeline capacity is consistent.
-                model.rigid_contact_max = ((estimated_contacts + world_count - 1) // world_count) * world_count
-
-            # Round up to the nearest multiple of the world count to account for Kamino's per world capacity.
-            world_max_contacts = [(model.rigid_contact_max + world_count - 1) // world_count] * world_count
+        elif contact_capacity.model_max_contacts > 0:
             self._contacts_kamino = self._kamino.ContactsKamino(
-                # TODO: model=self._model_kamino,
-                capacity=world_max_contacts,
+                contact_capacity,
                 device=self.model.device,
                 remappable=True,
             )
@@ -1130,7 +1062,8 @@ class SolverKamino(SolverBase, CouplingInterface):
         else:
             self._detector = None
             # Clear the internal contacts container to avoid using stale contacts from previous steps.
-            self._contacts_kamino.clear()
+            if self._contacts_kamino is not None:
+                self._contacts_kamino.clear()
 
         # Convert Newton body-frame poses to Kamino CoM-frame poses
         self._kamino.convert_body_origin_to_com(

@@ -30,7 +30,6 @@ from ..core.materials import DEFAULT_FRICTION, DEFAULT_RESTITUTION, make_get_mat
 from ..core.model import ModelKamino
 from ..geometry.contacts import (
     DEFAULT_GEOM_PAIR_CONTACT_GAP,
-    DEFAULT_GEOM_PAIR_MAX_CONTACTS,
     DEFAULT_TRIANGLE_MAX_PAIRS,
     ContactsKamino,
     make_contact_frame_znorm,
@@ -410,8 +409,6 @@ class CollisionPipelineUnifiedKamino:
         self,
         model: ModelKamino,
         broadphase: Literal["nxn", "sap", "explicit"] = "explicit",
-        max_contacts: int | None = None,
-        max_contacts_per_pair: int = DEFAULT_GEOM_PAIR_MAX_CONTACTS,
         max_triangle_pairs: int = DEFAULT_TRIANGLE_MAX_PAIRS,
         default_gap: float = DEFAULT_GEOM_PAIR_CONTACT_GAP,
         default_friction: float = DEFAULT_FRICTION,
@@ -420,11 +417,12 @@ class CollisionPipelineUnifiedKamino:
         """
         Initialize an instance of Kamino's wrapper of the unified collision detection pipeline.
 
+        The contacts it writes are limited by the capacity of the :class:`ContactsKamino`
+        container passed to :meth:`collide`.
+
         Args:
             model: The Kamino model containing the geometry to perform collision detection on.
             broadphase: Broad-phase back-end to use (NXN, SAP, or EXPLICIT).
-            max_contacts: Maximum contacts for the entire model (overrides computed value).
-            max_contacts_per_pair: Maximum contacts per colliding geometry pair.
             max_triangle_pairs: Maximum triangle pairs for mesh/mesh and mesh/hfield collisions.
             default_gap: Default detection gap [m] applied as a floor to per-geometry gaps.
             default_friction: Default contact friction coefficient.
@@ -441,7 +439,6 @@ class CollisionPipelineUnifiedKamino:
         self._default_gap: float = default_gap
         self._default_friction: float = default_friction
         self._default_restitution: float = default_restitution
-        self._max_contacts_per_pair: int = max_contacts_per_pair
         self._max_triangle_pairs: int = max_triangle_pairs
 
         # Get geometry count from model
@@ -465,19 +462,12 @@ class CollisionPipelineUnifiedKamino:
             self._max_shape_pairs: int = int(per_world_pairs)
         else:
             self._max_shape_pairs: int = (self._num_geoms * (self._num_geoms - 1)) // 2
-        self._max_contacts: int = self._max_shape_pairs * self._max_contacts_per_pair
-
-        # Override max contacts if specified explicitly
-        if max_contacts is not None:
-            self._max_contacts = max_contacts
 
         # Build shape pairs for EXPLICIT mode
         self.shape_pairs_filtered: wp.array[wp.vec2i] | None = None
         if broadphase == "explicit":
             self.shape_pairs_filtered = self._model.geoms.collidable_pairs
             self._max_shape_pairs = self._model.geoms.num_collidable_pairs
-            if max_contacts is None:
-                self._max_contacts = self._model.geoms.model_minimum_contacts
 
         # Build excluded pairs for NXN/SAP broadphase filtering.
         self._excluded_pairs: wp.array[wp.vec2i] | None = None

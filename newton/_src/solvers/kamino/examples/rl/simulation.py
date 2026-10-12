@@ -28,6 +28,7 @@ from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.core.state import StateKamino
 from newton._src.solvers.kamino._src.geometry import CollisionDetector
 from newton._src.solvers.kamino._src.geometry.aggregation import ContactAggregation
+from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity
 from newton._src.solvers.kamino._src.geometry.contacts import ContactsKamino, convert_contacts_newton_to_kamino
 from newton._src.solvers.kamino._src.solver_kamino_impl import SolverKaminoImpl
 from newton._src.solvers.kamino._src.utils import logger as msg
@@ -94,11 +95,12 @@ class SimulatorFromNewton:
             self._newton_state = newton_model.state()
             self._newton_collision_pipeline = newton.CollisionPipeline(newton_model)
             self._newton_contacts = self._newton_collision_pipeline.contacts()
-            per_world = max(1024, (newton_model.rigid_contact_max or 0) // max(newton_model.world_count, 1))
-            if config.collision_detector.max_contacts_per_world is not None:
-                per_world = min(per_world, config.collision_detector.max_contacts_per_world)
-            world_max = [per_world] * newton_model.world_count
-            self._contacts = ContactsKamino(capacity=world_max, device=self._device)
+            capacity = ContactCapacity.resolve_from(
+                self._model,
+                config=config.collision_detector,
+                rigid_contact_max=newton_model.rigid_contact_max,
+            )
+            self._contacts = ContactsKamino(capacity, device=self._device) if capacity.model_max_contacts > 0 else None
         else:
             self._newton_model = None
             self._newton_state = None
@@ -159,12 +161,13 @@ class SimulatorFromNewton:
             body_q=self._newton_state.body_q,
         )
         self._newton_collision_pipeline.collide(self._newton_state, self._newton_contacts)
-        convert_contacts_newton_to_kamino(
-            self._newton_model,
-            self._newton_state,
-            self._newton_contacts,
-            self._contacts,
-        )
+        if self._contacts is not None:
+            convert_contacts_newton_to_kamino(
+                self._newton_model,
+                self._newton_state,
+                self._newton_contacts,
+                self._contacts,
+            )
 
     def step(self):
         """Advance the simulation by one timestep.

@@ -13,11 +13,7 @@ from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.geometry import (
     CollisionDetector,
 )
-from newton._src.solvers.kamino._src.geometry.detector import (
-    _cap_world_contacts_at_total,
-    _estimate_fallback_world_max_contacts,
-    _resolve_contact_capacity,
-)
+from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity
 from newton._src.solvers.kamino._src.utils import logger as msg
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.test_kamino_geometry_primitive import check_contacts
@@ -212,6 +208,7 @@ class TestGeometryCollisionDetector(unittest.TestCase):
         self.assertGreater(detector.world_max_contacts[0], 0)
         self.assertEqual(detector.world_max_contacts[1], 0)
         self.assertEqual(detector.world_max_contacts, model.geoms.world_minimum_contacts)
+        self.assertEqual(detector.contacts.world_max_contacts_host, detector.world_max_contacts)
 
 
 class TestCollisionDetectorContactCapacity(unittest.TestCase):
@@ -220,33 +217,33 @@ class TestCollisionDetectorContactCapacity(unittest.TestCase):
             setup_tests(clear_cache=False)
         self.default_device = wp.get_device(test_context.device)
 
-    def test_00_cap_world_contacts_at_total(self):
-        """Verify proportional capping preserves the configured model total."""
-        capped = _cap_world_contacts_at_total([100, 50, 50], 120)
-        self.assertEqual(sum(capped), 120)
-        self.assertEqual(capped[0], 60)
-
-    def test_01_fallback_explicit_per_world_pair_counts(self):
-        """Verify fallback explicit broad-phase estimates accumulate pairs per world."""
-        builder = ModelBuilder()
-        builder.replicate(builder=basics.build_boxes_nunchaku(), world_count=2)
-        model = ModelKamino.from_newton(builder.finalize(self.default_device))
-        config = CollisionDetector.Config(broadphase="explicit")
-
-        world_max = _estimate_fallback_world_max_contacts(model, config)
-        self.assertEqual(len(world_max), 2)
-        self.assertGreater(world_max[0], 0)
-        self.assertEqual(world_max[0], world_max[1])
-
     def test_02_resolve_contact_capacity_uses_pair_metadata(self):
         """Verify the default resolved budget matches pair-based metadata."""
         builder = basics.build_boxes_nunchaku()
         model = ModelKamino.from_newton(builder.finalize(self.default_device))
-        config = CollisionDetector.Config()
 
-        model_max, world_max = _resolve_contact_capacity(model, config)
-        self.assertEqual(world_max, model.geoms.world_minimum_contacts)
-        self.assertEqual(model_max, model.geoms.model_minimum_contacts)
+        detector = CollisionDetector(model=model, config=CollisionDetector.Config())
+        self.assertEqual(detector.world_max_contacts, list(model.geoms.world_minimum_contacts))
+        self.assertEqual(detector.model_max_contacts, model.geoms.model_minimum_contacts)
+        self.assertEqual(
+            list(ContactCapacity.resolve_from(model).world_max_contacts), list(model.geoms.world_minimum_contacts)
+        )
+
+    def test_03_solver_supplied_capacity_is_honored_verbatim(self):
+        """Verify the detector allocates a caller-supplied ContactCapacity verbatim."""
+        builder = ModelBuilder()
+        builder.replicate(builder=basics.build_boxes_nunchaku(), world_count=3)
+        model = ModelKamino.from_newton(builder.finalize(self.default_device))
+        overridden = ContactCapacity(world_max_contacts=(4, 8, 15))
+
+        detector = CollisionDetector(
+            model=model,
+            config=CollisionDetector.Config(pipeline="primitive", broadphase="explicit"),
+            capacity=overridden,
+        )
+        self.assertEqual(detector.world_max_contacts, [4, 8, 15])
+        self.assertEqual(detector.model_max_contacts, 27)
+        self.assertEqual(detector.contacts.world_max_contacts_host, [4, 8, 15])
 
 
 ###

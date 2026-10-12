@@ -1389,11 +1389,11 @@ def convert_contacts_newton_to_kamino(
             f"contacts_out.device={contacts_out.device}"
         )
 
-    # Issue warning to the user if the number of contacts to
-    # convert exceeds the capacity of the output contacts.
+    # A Kamino capacity below the Newton buffer is expected whenever the geometric bound is
+    # tighter; contacts that actually overflow a world are reported by the conversion kernel.
     if contacts_in.rigid_contact_max > contacts_out.model_max_contacts_host:
-        msg.warning(
-            "Newton `rigid_contact_max` (%d) exceeds Kamino `model_max_contacts_host` (%d); active contacts may be truncated.",
+        msg.debug(
+            "Newton `rigid_contact_max` (%d) exceeds Kamino `model_max_contacts_host` (%d).",
             contacts_in.rigid_contact_max,
             contacts_out.model_max_contacts_host,
         )
