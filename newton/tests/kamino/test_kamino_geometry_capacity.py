@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.geometry.contact_reduction import MAX_CONTACTS_PER_PAIR
 from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.geometry.capacity import (
     ContactCapacity,
@@ -255,6 +256,19 @@ class TestContactCapacityResolve(unittest.TestCase):
         model = _make_box_worlds(self.default_device, [2, 3])
         # Each box adds 20 neighbors x 5 contacts / 2 = 50, and the global plane adds 5 per box.
         self.assertEqual(_world_neighbor_bounds(model), [2 * 50 + 2 * 5, 3 * 50 + 3 * 5])
+
+    def test_heightfield_world_reserves_reduction_cap(self):
+        """Reserve the per-pair reduction cap for a capsule resting on a heightfield."""
+        builder = newton.ModelBuilder()
+        heightfield = newton.Heightfield(data=np.zeros((8, 8), dtype=np.float32), nrow=8, ncol=8, hx=4.0, hy=4.0)
+        builder.add_shape_heightfield(heightfield=heightfield)
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 0.5), wp.quat_identity()))
+        builder.add_shape_capsule(body, radius=0.1, half_height=0.2)
+        model = ModelKamino.from_newton(builder.finalize(device=self.default_device))
+
+        # One primitive and one mesh-like shape: (5 + 40) contacts x 20 neighbors / 2.
+        self.assertEqual(_world_neighbor_bounds(model), [450])
+        self.assertEqual(ContactCapacity.resolve_from(model).world_max_contacts, (MAX_CONTACTS_PER_PAIR,))
 
 
 class TestConversionMetadataInvariance(unittest.TestCase):

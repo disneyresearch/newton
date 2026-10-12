@@ -10,6 +10,7 @@ import unittest
 import numpy as np
 import warp as wp
 
+from newton._src.geometry.contact_reduction import MAX_CONTACTS_PER_PAIR
 from newton._src.geometry.types import GeoType
 from newton._src.solvers.kamino._src.core.shapes import (
     BoxShape,
@@ -44,6 +45,35 @@ class TestMaxContactsForShapePair(unittest.TestCase):
 
                 with self.subTest(type_a=type_a, type_b=type_b):
                     self.assertEqual(_max_contacts_for_shape_pair_impl(int(type_a), int(type_b)), (0, 0))
+
+    def test_mesh_like_pairs_reserve_reduction_cap(self):
+        """Reserve Newton's per-pair reduction cap for every pair involving a triangle mesh or heightfield."""
+        colliding_types = [t for t in GeoType if t not in (GeoType.NONE, GeoType.GAUSSIAN)]
+        mesh_like_types = (GeoType.MESH, GeoType.HFIELD)
+        for type_a in colliding_types:
+            for type_b in colliding_types:
+                if type_a > type_b or (type_a not in mesh_like_types and type_b not in mesh_like_types):
+                    continue
+
+                with self.subTest(type_a=type_a, type_b=type_b):
+                    self.assertEqual(
+                        _max_contacts_for_shape_pair_impl(int(type_a), int(type_b)), (MAX_CONTACTS_PER_PAIR, 0)
+                    )
+
+    def test_convex_mesh_pairs_keep_current_bounds(self):
+        """Keep the convex-mesh bounds for pairs without a triangle mesh or heightfield."""
+        for type_a in (
+            GeoType.PLANE,
+            GeoType.SPHERE,
+            GeoType.CAPSULE,
+            GeoType.ELLIPSOID,
+            GeoType.CYLINDER,
+            GeoType.BOX,
+            GeoType.CONE,
+        ):
+            with self.subTest(type_a=type_a):
+                self.assertEqual(_max_contacts_for_shape_pair_impl(int(type_a), int(GeoType.CONVEX_MESH)), (32, 0))
+        self.assertEqual(_max_contacts_for_shape_pair_impl(int(GeoType.CONVEX_MESH), int(GeoType.CONVEX_MESH)), (64, 0))
 
 
 class TestShapeDescriptors(unittest.TestCase):

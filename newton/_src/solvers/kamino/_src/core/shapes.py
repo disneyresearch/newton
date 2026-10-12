@@ -12,6 +12,7 @@ import numpy as np
 import warp as wp
 
 from .....core.types import Vec2, Vec3, override
+from .....geometry.contact_reduction import MAX_CONTACTS_PER_PAIR
 from .....geometry.types import GeoType, Heightfield, Mesh
 from .types import Descriptor
 
@@ -607,8 +608,11 @@ ShapeDescriptorType = (
 # Utilities
 ###
 
-# Contact counts for mesh/heightfield pairs are dynamic (bounded by the
-# pipeline's max_contacts_per_pair setting).  The values below are
+# Pairs involving a triangle mesh or heightfield go through Newton's contact
+# reduction, which retains at most this many contacts per shape pair.
+_MESH_LIKE_PAIR_MAX = MAX_CONTACTS_PER_PAIR
+
+# Contact counts for convex-mesh pairs are dynamic. The values below are
 # conservative upper-bound estimates used for capacity allocation.
 _MESH_CONVEX_MAX = 32
 _MESH_MESH_MAX = 64
@@ -650,7 +654,7 @@ def _max_contacts_for_shape_pair_impl(type_a: int, type_b: int) -> tuple[int, in
     """
     if type_a == GeoType.PLANE:
         if type_b == GeoType.HFIELD:
-            return _MESH_CONVEX_MAX, 0
+            return _MESH_LIKE_PAIR_MAX, 0
         elif type_b == GeoType.SPHERE:
             return 1, 0
         elif type_b == GeoType.CAPSULE:
@@ -661,19 +665,21 @@ def _max_contacts_for_shape_pair_impl(type_a: int, type_b: int) -> tuple[int, in
             return 4, 0
         elif type_b == GeoType.BOX:
             return 4, 0
-        elif type_b == GeoType.MESH or type_b == GeoType.CONVEX_MESH:
+        elif type_b == GeoType.MESH:
+            return _MESH_LIKE_PAIR_MAX, 0
+        elif type_b == GeoType.CONVEX_MESH:
             return _MESH_CONVEX_MAX, 0
         elif type_b == GeoType.CONE:
             return 5, 0
 
     elif type_a == GeoType.HFIELD:
-        if type_b == GeoType.MESH:
-            return _MESH_MESH_MAX, 0
-        elif type_b >= GeoType.HFIELD:
-            return _MESH_CONVEX_MAX, 0
+        if type_b >= GeoType.HFIELD:
+            return _MESH_LIKE_PAIR_MAX, 0
 
     elif type_a == GeoType.SPHERE:
-        if type_b == GeoType.MESH or type_b == GeoType.CONVEX_MESH:
+        if type_b == GeoType.MESH:
+            return _MESH_LIKE_PAIR_MAX, 0
+        elif type_b == GeoType.CONVEX_MESH:
             return _MESH_CONVEX_MAX, 0
         elif type_b >= GeoType.SPHERE:
             return 1, 0
@@ -687,7 +693,9 @@ def _max_contacts_for_shape_pair_impl(type_a: int, type_b: int) -> tuple[int, in
             return 5, 0
         elif type_b == GeoType.BOX:
             return 5, 0
-        elif type_b == GeoType.MESH or type_b == GeoType.CONVEX_MESH:
+        elif type_b == GeoType.MESH:
+            return _MESH_LIKE_PAIR_MAX, 0
+        elif type_b == GeoType.CONVEX_MESH:
             return _MESH_CONVEX_MAX, 0
         elif type_b == GeoType.CONE:
             return 5, 0
@@ -699,7 +707,9 @@ def _max_contacts_for_shape_pair_impl(type_a: int, type_b: int) -> tuple[int, in
             return 1, 0
         elif type_b == GeoType.BOX:
             return 1, 0
-        elif type_b == GeoType.MESH or type_b == GeoType.CONVEX_MESH:
+        elif type_b == GeoType.MESH:
+            return _MESH_LIKE_PAIR_MAX, 0
+        elif type_b == GeoType.CONVEX_MESH:
             return _MESH_CONVEX_MAX, 0
         elif type_b == GeoType.CONE:
             return 1, 0
@@ -709,7 +719,9 @@ def _max_contacts_for_shape_pair_impl(type_a: int, type_b: int) -> tuple[int, in
             return 5, 0
         elif type_b == GeoType.BOX:
             return 5, 0
-        elif type_b == GeoType.MESH or type_b == GeoType.CONVEX_MESH:
+        elif type_b == GeoType.MESH:
+            return _MESH_LIKE_PAIR_MAX, 0
+        elif type_b == GeoType.CONVEX_MESH:
             return _MESH_CONVEX_MAX, 0
         elif type_b == GeoType.CONE:
             return 5, 0
@@ -717,18 +729,16 @@ def _max_contacts_for_shape_pair_impl(type_a: int, type_b: int) -> tuple[int, in
     elif type_a == GeoType.BOX:
         if type_b == GeoType.BOX:
             return 8, 0
-        elif type_b == GeoType.MESH or type_b == GeoType.CONVEX_MESH:
+        elif type_b == GeoType.MESH:
+            return _MESH_LIKE_PAIR_MAX, 0
+        elif type_b == GeoType.CONVEX_MESH:
             return _MESH_CONVEX_MAX, 0
         elif type_b == GeoType.CONE:
             return 5, 0
 
     elif type_a == GeoType.MESH:
-        if type_b == GeoType.MESH:
-            return _MESH_MESH_MAX, 0
-        elif type_b == GeoType.CONE:
-            return _MESH_CONVEX_MAX, 0
-        elif type_b == GeoType.CONVEX_MESH:
-            return _MESH_MESH_MAX, 0
+        if type_b == GeoType.MESH or type_b == GeoType.CONE or type_b == GeoType.CONVEX_MESH:
+            return _MESH_LIKE_PAIR_MAX, 0
 
     elif type_a == GeoType.CONE:
         if type_b == GeoType.CONE:
