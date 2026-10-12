@@ -1020,12 +1020,15 @@ def make_update_dual_variables_and_compute_primal_dual_residuals(use_acceleratio
 
 
 @functools.cache
-def _make_project_dual_convergence_accel_kernel(reduction_size: int):
+def _make_project_dual_convergence_accel_kernel(reduction_size: int, use_relative_tolerance: bool = False):
     """Create one accelerated PADMM projection/update kernel per world.
 
     Each block owns one world. Threads sweep the world's constraints, write the
     slack and dual variables, reduce residual metrics, update convergence and
     acceleration state, then cache the current iterates for the next iteration.
+
+    If `use_relative_tolerance` is set, the infinity-norms of the (physical) reactions
+    and augmented velocities are also reduced to scale the relative tolerances.
     """
 
     @wp.kernel(module="unique", module_options={"enable_backward": False, "default_grid_stride": False})
@@ -1113,6 +1116,8 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
         r_dx_local = wp.float32(0.0)
         r_dy_local = wp.float32(0.0)
         r_dz_local = wp.float32(0.0)
+        n_xy_local = wp.float32(0.0)
+        n_z_local = wp.float32(0.0)
 
         # Each thread strides over rows. Contact rows are processed by the
         # first component thread because Coulomb projection is a 3D block op.
@@ -1164,6 +1169,9 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
                             r_dx_local += r_dx * r_dx
                             r_dy_local += r_dy * r_dy
                             r_dz_local += r_dz * r_dz
+                            if wp.static(use_relative_tolerance):
+                                n_xy_local = wp.max(n_xy_local, wp.max(wp.abs(p_i * x), wp.abs(p_i * y)))
+                                n_z_local = wp.max(n_z_local, wp.abs(z / p_i))
 
                         r_c_local = wp.max(r_c_local, wp.abs(wp.dot(x_c, z_c)))
                 else:
@@ -1201,6 +1209,9 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
                     r_dx_local += r_dx * r_dx
                     r_dy_local += r_dy * r_dy
                     r_dz_local += r_dz * r_dz
+                    if wp.static(use_relative_tolerance):
+                        n_xy_local = wp.max(n_xy_local, wp.max(wp.abs(p_i * x), wp.abs(p_i * y)))
+                        n_z_local = wp.max(n_z_local, wp.abs(z / p_i))
 
                     if is_bounded:
                         r_box = compute_box_complementarity_residual(
@@ -1236,6 +1247,21 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
         r_dy_l2_sum = wp.tile_sum(r_dy_tile)[0]
         r_dz_l2_sum = wp.tile_sum(r_dz_tile)[0]
 
+        # Compute the tolerances, optionally relative to the magnitudes of the reactions and velocities
+        eps_p = config.primal_tolerance
+        eps_d = config.dual_tolerance
+        eps_c = config.compl_tolerance
+        if wp.static(use_relative_tolerance):
+            n_xy_tile = wp.tile_zeros(shape=reduction_size, dtype=wp.float32, storage="shared")
+            n_z_tile = wp.tile_zeros(shape=reduction_size, dtype=wp.float32, storage="shared")
+            wp.tile_scatter_masked(n_xy_tile, tid, n_xy_local, active_thread)
+            wp.tile_scatter_masked(n_z_tile, tid, n_z_local, active_thread)
+            n_xy = wp.tile_max(n_xy_tile)[0]
+            n_z = wp.tile_max(n_z_tile)[0]
+            eps_p += config.primal_tolerance_rel * n_xy
+            eps_d += config.dual_tolerance_rel * n_z
+            eps_c += config.compl_tolerance_rel * n_xy * n_z
+
         if tid == 0:
             # Advance the per-world solver status and acceleration restart state.
             status.iterations += 1
@@ -1253,12 +1279,7 @@ def _make_project_dual_convergence_accel_kernel(reduction_size: int):
             status.r_dz = wp.sqrt(r_dz_l2_sum)
             status.r_a = rho * r_dy_l2_sum + (1.0 / rho) * r_dz_l2_sum
 
-            if (
-                status.iterations > 1
-                and r_p_max <= config.primal_tolerance
-                and r_d_max <= config.dual_tolerance
-                and r_c_max <= config.compl_tolerance
-            ):
+            if status.iterations > 1 and r_p_max <= eps_p and r_d_max <= eps_d and r_c_max <= eps_c:
                 status.converged = 1
 
             if status.converged or status.iterations >= config.max_iterations:
@@ -1453,8 +1474,16 @@ def mul_mask(mask: Any, value: Any):
     return wp.where(mask > type(mask)(0), value, type(value)(0))
 
 
+@wp.func
+def _div_or_zero(x: wp.float32, y: wp.float32) -> wp.float32:
+    """Return x / y if y is non-zero, else 0"""
+    return wp.where(y != 0.0, x / y, 0.0)
+
+
 @functools.cache
-def _make_compute_infnorm_residuals_kernel(tile_size: int, n_cts_max: int, n_compl_max: int):
+def _make_compute_infnorm_residuals_kernel(
+    tile_size: int, n_cts_max: int, n_compl_max: int, use_relative_tolerance: bool = False
+):
     num_tiles_cts = (n_cts_max + tile_size - 1) // tile_size
     num_tiles_i = (n_compl_max + tile_size - 1) // tile_size
 
@@ -1471,6 +1500,10 @@ def _make_compute_infnorm_residuals_kernel(tile_size: int, n_cts_max: int, n_com
         solver_r_p: wp.array[wp.float32],
         solver_r_d: wp.array[wp.float32],
         solver_r_c: wp.array[wp.float32],
+        problem_P: wp.array[wp.float32],
+        solver_x: wp.array[wp.float32],
+        solver_y: wp.array[wp.float32],
+        solver_z: wp.array[wp.float32],
         # Outputs:
         solver_state_done: wp.array[wp.int32],
         solver_status: wp.array[PADMMStatus],
@@ -1514,9 +1547,14 @@ def _make_compute_infnorm_residuals_kernel(tile_size: int, n_cts_max: int, n_com
         # Compute element-wise max over each residual vector to compute the infinity-norm
         r_p_max = wp.float32(0.0)
         r_d_max = wp.float32(0.0)
+        n_xy = wp.float32(0.0)
+        n_z = wp.float32(0.0)
         if wp.static(num_tiles_cts > 1):
             r_p_max_acc = wp.tile_zeros(num_tiles_cts, dtype=wp.float32, storage="shared")
             r_d_max_acc = wp.tile_zeros(num_tiles_cts, dtype=wp.float32, storage="shared")
+            if wp.static(use_relative_tolerance):
+                n_xy_acc = wp.tile_zeros(num_tiles_cts, dtype=wp.float32, storage="shared")
+                n_z_acc = wp.tile_zeros(num_tiles_cts, dtype=wp.float32, storage="shared")
         for tile_id in range(num_tiles_cts):
             ct_id_tile = tile_id * tile_size
             if ct_id_tile >= ncts:
@@ -1545,9 +1583,43 @@ def _make_compute_infnorm_residuals_kernel(tile_size: int, n_cts_max: int, n_com
                 r_d_max_acc[tile_id] = wp.tile_max(tile)[0]
             else:
                 r_d_max = wp.tile_max(tile)[0]
+
+            # Optionally compute the infinity-norms of the physical reactions and augmented velocities
+            if wp.static(use_relative_tolerance):
+                tile_P = wp.tile_load(problem_P, shape=tile_size, offset=rio_tile)
+                tile_x = wp.tile_map(
+                    wp.abs, wp.tile_map(wp.mul, wp.tile_load(solver_x, shape=tile_size, offset=rio_tile), tile_P)
+                )
+                tile_y = wp.tile_map(
+                    wp.abs, wp.tile_map(wp.mul, wp.tile_load(solver_y, shape=tile_size, offset=rio_tile), tile_P)
+                )
+                tile = wp.tile_map(wp.max, tile_x, tile_y)
+                if need_mask:
+                    tile = wp.tile_map(mul_mask, mask, tile)
+                if wp.static(num_tiles_cts > 1):
+                    n_xy_acc[tile_id] = wp.tile_max(tile)[0]
+                else:
+                    n_xy = wp.tile_max(tile)[0]
+                tile_z = wp.tile_load(solver_z, shape=tile_size, offset=rio_tile)
+                tile = wp.tile_map(wp.abs, wp.tile_map(_div_or_zero, tile_z, tile_P))
+                if need_mask:
+                    tile = wp.tile_map(mul_mask, mask, tile)
+                if wp.static(num_tiles_cts > 1):
+                    n_z_acc[tile_id] = wp.tile_max(tile)[0]
+                else:
+                    n_z = wp.tile_max(tile)[0]
         if wp.static(num_tiles_cts > 1):
             r_p_max = wp.tile_max(r_p_max_acc)[0]
             r_d_max = wp.tile_max(r_d_max_acc)[0]
+            if wp.static(use_relative_tolerance):
+                n_xy = wp.tile_max(n_xy_acc)[0]
+                n_z = wp.tile_max(n_z_acc)[0]
+
+        # Optionally augment the tolerances relative to the magnitudes of the reactions and velocities
+        if wp.static(use_relative_tolerance):
+            eps_p += config.primal_tolerance_rel * n_xy
+            eps_d += config.dual_tolerance_rel * n_z
+            eps_c += config.compl_tolerance_rel * n_xy * n_z
 
         # Compute the infinity-norm of the complementarity residuals.
         ni = nbc + nl + nc

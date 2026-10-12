@@ -594,6 +594,29 @@ class PADMMSolverConfig:
     Must be greater than zero. Defaults to `1e-6`.
     """
 
+    primal_tolerance_rel: float = 0.0
+    """
+    The relative tolerance on the total primal residual `r_primal`, which is converged once
+    `r_primal <= primal_tolerance + primal_tolerance_rel * max(||lambda_x||_inf, ||lambda_y||_inf)`,
+    where `lambda_x` and `lambda_y` are the unprojected and projected constraint reactions.\n
+    Must be non-negative. Defaults to `0.0`, i.e. only the absolute tolerance is used.
+    """
+
+    dual_tolerance_rel: float = 0.0
+    """
+    The relative tolerance on the total dual residual `r_dual`, which is converged once
+    `r_dual <= dual_tolerance + dual_tolerance_rel * ||v_aug||_inf`, where `v_aug` is the augmented
+    (i.e. De Saxce-corrected) post-event constraint velocity.\n
+    Must be non-negative. Defaults to `0.0`, i.e. only the absolute tolerance is used.
+    """
+
+    compl_tolerance_rel: float = 0.0
+    """
+    The relative tolerance on the complementarity residual `r_compl`, which is converged once
+    `r_compl <= compl_tolerance + compl_tolerance_rel * max(||lambda_x||_inf, ||lambda_y||_inf) * ||v_aug||_inf`.\n
+    Must be non-negative. Defaults to `0.0`, i.e. only the absolute tolerance is used.
+    """
+
     restart_tolerance: float = 0.999
     """
     The tolerance on the total combined primal-dual residual `r_comb`,
@@ -952,6 +975,9 @@ class PADMMSolverConfig:
             raise ValueError(f"Invalid dual tolerance: {self.dual_tolerance}. Must be non-negative.")
         if self.compl_tolerance < 0.0:
             raise ValueError(f"Invalid complementarity tolerance: {self.compl_tolerance}. Must be non-negative.")
+        for name in ("primal_tolerance_rel", "dual_tolerance_rel", "compl_tolerance_rel"):
+            if getattr(self, name) < 0.0:
+                raise ValueError(f"Invalid relative tolerance `{name}`: {getattr(self, name)}. Must be non-negative.")
         if not (0.0 <= self.restart_tolerance < 1.0):
             raise ValueError(f"Invalid restart tolerance: {self.restart_tolerance}. Must be in the range [0.0, 1.0).")
         if self.eta <= 0.0:
@@ -1031,7 +1057,9 @@ class PADMMPrimalSolverConfig(PADMMSolverConfig):
       velocity (i.e. mass), and are the inverses of the corresponding dual penalties.
     - The `primal_tolerance` applies to the primal residual of the primal algorithm, i.e. the
       constraint-velocity consistency, and the `dual_tolerance` to its dual residual, i.e. the
-      consistency of the trial and admissible constraint reactions.
+      consistency of the trial and admissible constraint reactions. Accordingly, the relative
+      `primal_tolerance_rel` is relative to the magnitude of the augmented constraint velocities,
+      and the relative `dual_tolerance_rel` to that of the constraint reactions.
     - The `spectral` penalty is `rho = kappa^{-p} / sqrt(m * L)`, i.e. the inverse of the dual
       spectral penalty, whose exponent `p` is increased by `spectral_power_inc` when the dual
       residual exceeds `alpha` times the primal residual (which decreases `rho`), and decreased by
@@ -1101,6 +1129,8 @@ class PADMMPrimalSolverConfig(PADMMSolverConfig):
         values = {f.name: getattr(self, f.name) for f in fields(PADMMSolverConfig)}
         values["primal_tolerance"] = self.dual_tolerance
         values["dual_tolerance"] = self.primal_tolerance
+        values["primal_tolerance_rel"] = self.dual_tolerance_rel
+        values["dual_tolerance_rel"] = self.primal_tolerance_rel
         values["rho_0"] = 1.0 / self.rho_0
         values["rho_min"] = 1.0 / self.rho_max
         values["rho_max"] = 1.0 / self.rho_min if self.rho_min > 0.0 else math.inf

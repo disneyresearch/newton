@@ -121,6 +121,11 @@ class TestPADMMPrimalSolverConfig(unittest.TestCase):
         self.assertAlmostEqual(dual.rho_max, 10.0)
         self.assertEqual(dual.max_iterations, 17)
 
+        # The relative tolerances are swapped like the absolute ones
+        dual = PADMMPrimalSolverConfig(primal_tolerance_rel=1e-3, dual_tolerance_rel=1e-5).to_dual_units()
+        self.assertEqual(dual.primal_tolerance_rel, 1e-5)
+        self.assertEqual(dual.dual_tolerance_rel, 1e-3)
+
         # The default primal penalty bounds map to the default dual penalty bounds
         dual = PADMMPrimalSolverConfig().to_dual_units()
         self.assertAlmostEqual(dual.rho_min, PADMMSolverConfig().rho_min)
@@ -327,7 +332,48 @@ class TestPADMMPrimalSolver(unittest.TestCase):
                 for w in range(test.model.size.num_worlds):
                     assert_close_normwise(z_0["primal"][w], z_0["dual"][w], tol=1e-3)
 
-    def test_07_solve_converges(self):
+    def test_07_relative_tolerances_match_dual_padmm(self):
+        """Checks that the relative tolerances terminate the primal PADMM like the (dual) PADMM."""
+        rtol_velocity, rtol_reaction = 1e-4, 1e-2
+        common = {
+            "primal_tolerance": 0.0,
+            "dual_tolerance": 0.0,
+            "compl_tolerance": 0.0,
+            "compl_tolerance_rel": 1e-4,
+            "max_iterations": 500,
+        }
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                test = TestSetup(basics.build_boxes_fourbar, self.default_device, sparse=sparse)
+                status = {}
+                for name, solver_type, config, problem in (
+                    (
+                        "dual",
+                        PADMMSolver,
+                        PADMMSolverConfig(
+                            primal_tolerance_rel=rtol_reaction, dual_tolerance_rel=rtol_velocity, **common
+                        ),
+                        test.dual,
+                    ),
+                    (
+                        "primal",
+                        PADMMPrimalSolver,
+                        PADMMPrimalSolverConfig(
+                            primal_tolerance_rel=rtol_velocity, dual_tolerance_rel=rtol_reaction, **common
+                        ),
+                        test.primal,
+                    ),
+                ):
+                    solver = solver_type(model=test.model, config=config, use_graph_conditionals=False)
+                    solver.coldstart()
+                    solver.solve(problem=problem)
+                    status[name] = solver.data.status.numpy()[0]
+                self.assertTrue(bool(status["dual"]["converged"]))
+                self.assertTrue(bool(status["primal"]["converged"]))
+                self.assertLess(status["dual"]["iterations"], 500)
+                self.assertLessEqual(abs(int(status["primal"]["iterations"]) - int(status["dual"]["iterations"])), 1)
+
+    def test_08_solve_converges(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 test = TestSetup(basics.build_box_on_plane, self.default_device, sparse=sparse)

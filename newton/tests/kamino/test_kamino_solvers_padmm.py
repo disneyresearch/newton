@@ -1412,6 +1412,77 @@ class TestPADMMConsistentWarmStart(unittest.TestCase):
                 self.assertLessEqual(iterations["consistent"], int(1.2 * iterations["cached"]) + 2)
 
 
+class TestPADMMRelativeTolerances(unittest.TestCase):
+    def setUp(self):
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.default_device = wp.get_device(test_context.device)
+
+    def tearDown(self):
+        self.default_device = None
+
+    def _solve(self, sparse: bool, use_acceleration: bool, **kwargs) -> tuple[TestSetup, PADMMSolver]:
+        test = TestSetup(
+            builder_fn=basics.build_boxes_fourbar, max_world_contacts=8, device=self.default_device, sparse=sparse
+        )
+        test.build()
+        solver = PADMMSolver(
+            model=test.model,
+            config=PADMMSolver.Config(max_iterations=500, **kwargs),
+            use_acceleration=use_acceleration,
+            use_graph_conditionals=False,
+        )
+        solver.coldstart()
+        solver.solve(problem=test.problem)
+        return test, solver
+
+    def test_01_zero_relative_tolerances_are_identical(self):
+        for use_acceleration in (False, True):
+            with self.subTest(use_acceleration=use_acceleration):
+                _, default = self._solve(sparse=False, use_acceleration=use_acceleration)
+                _, relative = self._solve(
+                    sparse=False,
+                    use_acceleration=use_acceleration,
+                    primal_tolerance_rel=0.0,
+                    dual_tolerance_rel=0.0,
+                    compl_tolerance_rel=0.0,
+                )
+                np.testing.assert_array_equal(relative.data.status.numpy(), default.data.status.numpy())
+                np.testing.assert_array_equal(
+                    relative.data.solution.lambdas.numpy(), default.data.solution.lambdas.numpy()
+                )
+
+    def test_02_relative_tolerances_terminate_solve(self):
+        eps_rel = 1e-4
+        tolerances = {
+            "primal_tolerance": 0.0,
+            "dual_tolerance": 0.0,
+            "compl_tolerance": 0.0,
+            "primal_tolerance_rel": eps_rel,
+            "dual_tolerance_rel": eps_rel,
+            "compl_tolerance_rel": eps_rel,
+        }
+        for sparse in (False, True):
+            for use_acceleration in (False, True):
+                with self.subTest(sparse=sparse, use_acceleration=use_acceleration):
+                    test, solver = self._solve(sparse=sparse, use_acceleration=use_acceleration, **tolerances)
+                    status = solver.data.status.numpy()[0]
+                    self.assertTrue(bool(status["converged"]))
+                    self.assertLess(status["iterations"], 500)
+
+                    # The residuals satisfy the relative criteria w.r.t. the final iterates,
+                    # which the solver has already mapped back to physical units
+                    n = test.data.info.num_total_cts.numpy()[0]
+                    state = solver.data.state
+                    x, y, z = (a.numpy()[:n] for a in (state.x, state.y, state.z))
+                    n_xy = max(np.max(np.abs(x)), np.max(np.abs(y)))
+                    n_z = np.max(np.abs(z))
+                    slack = 1.0 + 1e-5
+                    self.assertLessEqual(status["r_p"], eps_rel * n_xy * slack)
+                    self.assertLessEqual(status["r_d"], eps_rel * n_z * slack)
+                    self.assertLessEqual(status["r_c"], eps_rel * n_xy * n_z * slack)
+
+
 ###
 # Test execution
 ###

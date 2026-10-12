@@ -419,6 +419,9 @@ class TestSolverKaminoConfig(unittest.TestCase):
                 kamino_config.PADMMSolverConfig(warmstart_scale=scale)
         with self.assertRaises(ValueError):
             kamino_config.PADMMSolverConfig(warmstart_velocity="stale")
+        for name in ("primal_tolerance_rel", "dual_tolerance_rel", "compl_tolerance_rel"):
+            with self.subTest(name=name), self.assertRaises(ValueError):
+                kamino_config.PADMMSolverConfig(**{name: -1e-3})
 
     def test_02_reject_dense_adaptive_padmm_penalty(self):
         """Reject balanced PADMM penalties with dense dynamics, but accept spectral ones."""

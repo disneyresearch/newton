@@ -180,6 +180,15 @@ class PADMMConfigStruct:
     Must be greater than zero. Defaults to `1e-6`.
     """
 
+    primal_tolerance_rel: wp.float32
+    """The relative tolerance on `r_p` w.r.t. the magnitude of the constraint reactions. Defaults to `0.0`."""
+
+    dual_tolerance_rel: wp.float32
+    """The relative tolerance on `r_d` w.r.t. the magnitude of the augmented constraint velocities. Defaults to `0.0`."""
+
+    compl_tolerance_rel: wp.float32
+    """The relative tolerance on `r_c` w.r.t. the product of the reaction and velocity magnitudes. Defaults to `0.0`."""
+
     restart_tolerance: wp.float32
     """
     The tolerance applied on the total combined primal-dual residual `r_comb` (`r_a`),
@@ -1299,6 +1308,9 @@ def convert_config_to_struct(config: PADMMSolverConfig) -> PADMMConfigStruct:
     config_struct.primal_tolerance = config.primal_tolerance
     config_struct.dual_tolerance = config.dual_tolerance
     config_struct.compl_tolerance = config.compl_tolerance
+    config_struct.primal_tolerance_rel = config.primal_tolerance_rel
+    config_struct.dual_tolerance_rel = config.dual_tolerance_rel
+    config_struct.compl_tolerance_rel = config.compl_tolerance_rel
     config_struct.restart_tolerance = config.restart_tolerance
     config_struct.eta = config.eta
     config_struct.rho_0 = config.rho_0

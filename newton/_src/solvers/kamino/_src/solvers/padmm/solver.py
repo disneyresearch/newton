@@ -145,6 +145,7 @@ class PADMMSolver:
         self._warmstart: PADMMWarmStartMode = PADMMWarmStartMode.NONE
         self._use_acceleration: bool = True
         self._use_adaptive_penalty: bool = False
+        self._use_relative_tolerance: bool = False
         self._use_graph_conditionals: bool = True
         self._collect_info: bool = False
 
@@ -363,7 +364,13 @@ class PADMMSolver:
         )
         tile_size = get_tile_size(self._size.max_of_max_total_cts)
         block_dim = get_block_dim(tile_size, ratio=2, min_size=1)
-        self._project_dual_convergence_accel_kernel = _make_project_dual_convergence_accel_kernel(block_dim)
+        self._use_relative_tolerance = any(
+            c.primal_tolerance_rel > 0.0 or c.dual_tolerance_rel > 0.0 or c.compl_tolerance_rel > 0.0
+            for c in self._config
+        )
+        self._project_dual_convergence_accel_kernel = _make_project_dual_convergence_accel_kernel(
+            block_dim, self._use_relative_tolerance
+        )
 
     def reset(self, problem: ConstrainedDynamicsProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """
@@ -1496,6 +1503,7 @@ class PADMMSolver:
                 tile_size,
                 self._size.max_of_max_total_cts,
                 self._size.max_of_max_inequalities,
+                self._use_relative_tolerance,
             ),
             dim=self._size.num_worlds,
             block_dim=block_dim,
@@ -1511,6 +1519,10 @@ class PADMMSolver:
                 self._data.residuals.r_primal,
                 self._data.residuals.r_dual,
                 self._data.residuals.r_compl,
+                problem.data.P,
+                self._data.state.x,
+                self._data.state.y,
+                self._data.state.z,
                 # Outputs:
                 self._data.state.done,
                 self._data.status,

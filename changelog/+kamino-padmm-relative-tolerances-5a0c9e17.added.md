@@ -1,0 +1,1 @@
+Add relative stopping tolerances for the PADMM backends of `SolverKamino` via `SolverKamino.Config.padmm.primal_tolerance_rel`, `dual_tolerance_rel`, and `compl_tolerance_rel`, which scale with the magnitudes of the constraint reactions and velocities.
