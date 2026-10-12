@@ -729,6 +729,15 @@ class PADMMSolverConfig:
     Must be greater than zero. Defaults to `5`.
     """
 
+    penalty_warmstart: bool = False
+    """
+    Set to `True` to warm-start the adaptive penalty of each solve from the previous solve, i.e.
+    to start from the last exponent `p` of the `spectral` penalty, or from the last penalty `rho` of
+    the `balanced` penalty, instead of `spectral_power_0` or `rho_0`. Has no effect on the `fixed`
+    penalty. The penalty is re-initialized when the solver is reset.\n
+    Defaults to `False`.
+    """
+
     linear_solver_tolerance: float = 0.0
     """
     The default absolute tolerance for the iterative linear solver.\n

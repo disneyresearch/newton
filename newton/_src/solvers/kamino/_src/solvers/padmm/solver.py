@@ -43,6 +43,7 @@ from .kernels import (
     _make_project_dual_convergence_accel_kernel,
     _project_to_feasible_cone,
     _refine_spectral_lower_bound,
+    _reset_penalty,
     _reset_solver_data,
     _scale_warmstart_forces,
     _update_problem_proximal_regularization,
@@ -165,6 +166,7 @@ class PADMMSolver:
 
         # Declare the solver data container
         self._data: PADMMData | None = None
+        self._all_worlds_mask: wp.array[wp.bool] | None = None
 
         # Declare the device cache
         self._device: wp.DeviceLike = None
@@ -332,6 +334,10 @@ class PADMMSolver:
         configs = [convert_config_to_struct(c) for c in self._config]
         with wp.ScopedDevice(self._device):
             self._data.config = wp.array(configs, dtype=PADMMConfigStruct)
+            self._all_worlds_mask = wp.ones(shape=(self._size.num_worlds,), dtype=wp.bool)
+
+        # Initialize the ALM penalty, which may be warm-started across solves
+        self._reset_penalty(self._all_worlds_mask)
 
         # Specialize certain solver kernels depending on whether acceleration is enabled
         self._initialize_solver_kernel = make_initialize_solver_kernel(self._use_acceleration)
@@ -345,12 +351,15 @@ class PADMMSolver:
 
     def reset(self, problem: ConstrainedDynamicsProblem | None = None, world_mask: wp.array[wp.bool] | None = None):
         """
-        Resets the persistent solution cache used for internal warm-starting, for all worlds
-        or the subset selected by `world_mask`.
+        Resets the persistent solution cache used for internal warm-starting, as well as the
+        (possibly warm-started) ALM penalty, for all worlds or the subset selected by `world_mask`.
 
         This does not modify the scratch solver state (`self._data.state`), since that is
         unconditionally reinitialized by `coldstart()`/`warmstart()`.
         """
+        # Reset the ALM penalty of the selected worlds
+        self._reset_penalty(self._all_worlds_mask if world_mask is None else world_mask)
+
         # If no world mask is provided, reset the solution cache of all worlds
         if world_mask is None:
             self._data.solution.zero()
@@ -593,6 +602,16 @@ class PADMMSolver:
         # to number of worlds and decremented by each world that
         # converges or reaches the maximum number of iterations
         self._data.state.done.fill_(self._size.num_worlds)
+
+    def _reset_penalty(self, world_mask: wp.array[wp.bool]):
+        """Resets the ALM penalty of the worlds selected by `world_mask` to its initial value."""
+        wp.launch(
+            kernel=_reset_penalty,
+            dim=self._size.num_worlds,
+            inputs=[world_mask, self._data.config],
+            outputs=[self._data.penalty],
+            device=self.device,
+        )
 
     def _update_problem_regularization(self, problem: ConstrainedDynamicsProblem):
         """Propagate eta + rho to the diagonal regularization of the problem's linear system."""

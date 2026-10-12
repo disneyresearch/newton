@@ -281,6 +281,9 @@ class PADMMConfigStruct:
     spectral_power_dec: wp.float32
     """The decrement of the spectral exponent `p` when the dual residual dominates. Defaults to `0.05`."""
 
+    penalty_warmstart: wp.int32
+    """Flag (`1`) indicating that adaptive penalties are warm-started from the previous solve. Defaults to `0`."""
+
 
 @wp.struct
 class PADMMStatus:
@@ -1313,4 +1316,5 @@ def convert_config_to_struct(config: PADMMSolverConfig) -> PADMMConfigStruct:
     config_struct.spectral_power_0 = config.spectral_power_0
     config_struct.spectral_power_inc = config.spectral_power_inc
     config_struct.spectral_power_dec = config.spectral_power_dec
+    config_struct.penalty_warmstart = wp.int32(config.penalty_warmstart)
     return config_struct

@@ -1221,7 +1221,44 @@ class TestPADMMSpectralPenalty(unittest.TestCase):
                 eta = test.problem.data.eta.numpy()[: test.data.info.num_total_cts.numpy()[0]]
                 np.testing.assert_allclose(eta, config.eta + penalty["rho"], rtol=1e-6)
 
-    def test_04_spectral_solve_converges(self):
+    def test_04_penalty_warmstart(self):
+        """Checks that adaptive penalties are warm-started across solves only if enabled, until reset."""
+        common = {"primal_tolerance": 0.0, "dual_tolerance": 0.0, "compl_tolerance": 0.0, "max_iterations": 20}
+        cases = (
+            ("spectral", False, {"penalty_update_method": "spectral", "penalty_update_freq": 5}),
+            ("balanced", True, {"penalty_update_method": "balanced", "penalty_update_freq": 1, "rho_0": 1e-3}),
+        )
+        for name, sparse, kwargs in cases:
+            for penalty_warmstart in (False, True):
+                with self.subTest(method=name, penalty_warmstart=penalty_warmstart):
+                    test = TestSetup(
+                        builder_fn=basics.build_box_on_plane,
+                        max_world_contacts=8,
+                        device=self.default_device,
+                        sparse=sparse,
+                    )
+                    test.build()
+                    config = PADMMSolver.Config(penalty_warmstart=penalty_warmstart, **common, **kwargs)
+                    solver = PADMMSolver(model=test.model, config=config, use_graph_conditionals=False)
+                    solver.coldstart()
+                    solver.solve(problem=test.problem)
+                    key = "p" if name == "spectral" else "rho"
+                    initial = config.spectral_power_0 if name == "spectral" else config.rho_0
+                    final = solver.data.penalty.numpy()[0][key]
+                    self.assertNotAlmostEqual(final, initial, places=4)
+
+                    # The next solve starts from the last penalty only if warm-starting is enabled
+                    solver._initialize()
+                    expected = final if penalty_warmstart else initial
+                    np.testing.assert_allclose(solver.data.penalty.numpy()[0][key], expected, rtol=1e-6)
+                    self.assertEqual(solver.data.penalty.numpy()[0]["num_updates"], 0)
+
+                    # Resetting the solver re-initializes the penalty
+                    solver.reset()
+                    solver._initialize()
+                    np.testing.assert_allclose(solver.data.penalty.numpy()[0][key], initial, rtol=1e-6)
+
+    def test_05_spectral_solve_converges(self):
         for sparse in (False, True):
             for use_acceleration in (False, True):
                 with self.subTest(sparse=sparse, use_acceleration=use_acceleration):

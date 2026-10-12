@@ -248,15 +248,17 @@ def make_initialize_solver_kernel(use_acceleration: bool = False):
             status.restart = wp.int32(0)
             status.num_restarts = wp.int32(0)
 
-        # Initialize ALM penalty parameter and relevant meta-data
+        # Initialize ALM penalty parameter and relevant meta-data, unless an adaptive penalty is warm-started
+        # from the previous solve, i.e. from its last penalty, or from its last exponent of the spectral penalty
         # NOTE: The spectral penalty is subsequently initialized from the spectral estimates
-        penalty.rho = config.rho_0
+        if config.penalty_warmstart == 0 or config.penalty_update_method == wp.int32(PADMMPenaltyUpdate.FIXED):
+            penalty.rho = config.rho_0
+            penalty.p = config.spectral_power_0
         penalty.rho_p = wp.float32(0.0)
         penalty.num_updates = wp.int32(0)
-        penalty.p = config.spectral_power_0
 
         # Initialize the total proximal regularization
-        sigma[0] = config.eta + config.rho_0
+        sigma[0] = config.eta + penalty.rho
         sigma[1] = wp.float32(0.0)
 
         # Store the initialized per-world solver data
@@ -354,6 +356,29 @@ def _update_problem_proximal_regularization(
 
     # Set the proximal regularization term: eta + rho
     problem_eta[vio + tid] = solver_config[wid].eta + solver_penalty[wid].rho
+
+
+@wp.kernel
+def _reset_penalty(
+    # Inputs:
+    world_mask: wp.array[wp.bool],
+    solver_config: wp.array[PADMMConfigStruct],
+    # Outputs:
+    solver_penalty: wp.array[PADMMPenalty],
+):
+    # Retrieve the world index as the thread index
+    wid = wp.tid()
+
+    # Skip if the world is not selected
+    if not world_mask[wid]:
+        return
+
+    # Reset the ALM penalty to its initial value, e.g. to re-initialize warm-started adaptive penalties
+    config = solver_config[wid]
+    pen = PADMMPenalty()
+    pen.rho = config.rho_0
+    pen.p = config.spectral_power_0
+    solver_penalty[wid] = pen
 
 
 @wp.func
