@@ -790,6 +790,17 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertIsNotNone(solver._collision_detector_kamino)
         self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1, 1, 1])
 
+    def test_assigned_max_contacts_per_pair_warns_at_solver_creation(self):
+        """Warn at solver creation when max_contacts_per_pair is assigned after config construction."""
+        model = self._make_three_world_model()
+        config = SolverKamino.Config(use_collision_detector=True)
+        config.collision_detector.max_contacts_per_pair = 4
+
+        with self.assertWarnsRegex(DeprecationWarning, "max_contacts_per_pair") as caught:
+            solver = SolverKamino(model, config=config)
+        self.assertEqual(caught.filename, __file__)
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1, 1, 1])
+
 
 class TestConstraintFreeWorlds(unittest.TestCase):
     """Verify that worlds without joint, limit, or contact rows construct and step."""

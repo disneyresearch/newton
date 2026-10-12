@@ -1088,7 +1088,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=16,
                         max_contacts_per_world=16,
-                        max_contacts_per_pair=8,
                     ),
                 )
                 config.dvi.max_alternating_iterations = 200
@@ -2140,7 +2139,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=64 * model.world_count,
                         max_contacts_per_world=64,
-                        max_contacts_per_pair=16,
                     ),
                 )
                 solver = SolverKamino(model, config=config)
@@ -2436,7 +2434,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=512,
                         max_contacts_per_world=512,
-                        max_contacts_per_pair=8,
                     ),
                 )
                 solver = SolverKamino(model, config=config)
@@ -2747,7 +2744,6 @@ class TestDVISolver(unittest.TestCase):
             use_collision_detector=True,
             collision_detector=kamino_config.CollisionDetectorConfig(
                 max_contacts_per_world=8,
-                max_contacts_per_pair=8,
                 default_gap=gap,
             ),
             dynamics_solver="dvi",
@@ -2853,7 +2849,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=16,
                         max_contacts_per_world=16,
-                        max_contacts_per_pair=8,
                     ),
                 )
                 solver = SolverKamino(model, config=config)
@@ -2925,7 +2920,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=16,
                         max_contacts_per_world=16,
-                        max_contacts_per_pair=8,
                     ),
                 )
                 # Resolve the correction for the analytical velocity/distance checks.
@@ -2980,7 +2974,6 @@ class TestDVISolver(unittest.TestCase):
                         collision_detector=kamino_config.CollisionDetectorConfig(
                             max_contacts=16,
                             max_contacts_per_world=16,
-                            max_contacts_per_pair=8,
                         ),
                     )
                     # Resolve the correction for the analytical velocity/distance checks.
@@ -3053,7 +3046,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=16,
                         max_contacts_per_world=16,
-                        max_contacts_per_pair=8,
                     ),
                 )
                 solver = SolverKamino(model, config=config)
@@ -3138,7 +3130,6 @@ class TestDVISolver(unittest.TestCase):
                         collision_detector=kamino_config.CollisionDetectorConfig(
                             max_contacts=16,
                             max_contacts_per_world=16,
-                            max_contacts_per_pair=8,
                         ),
                     )
                     solver = SolverKamino(model, config=config)
@@ -3204,7 +3195,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=16,
                         max_contacts_per_world=16,
-                        max_contacts_per_pair=8,
                     ),
                 )
                 solver = SolverKamino(model, config=config)
@@ -4311,7 +4301,6 @@ class TestDVISolver(unittest.TestCase):
                     collision_detector=kamino_config.CollisionDetectorConfig(
                         max_contacts=16,
                         max_contacts_per_world=16,
-                        max_contacts_per_pair=8,
                     ),
                 )
                 solver = SolverKamino(model, config=config)

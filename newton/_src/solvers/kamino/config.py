@@ -8,6 +8,7 @@ Defines configurations for :class:`SolverKamino`.
 from __future__ import annotations
 
 import math
+import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal
 
@@ -101,28 +102,39 @@ class CollisionDetectorConfig(ConfigBase):
 
     max_contacts: int | None = None
     """
-    Model-wide cap on contact buffer capacity during collision-detector
-    initialization.\n
-    When ``max_contacts_per_world`` is None, the geometry-based estimate is
-    capped at this value; otherwise this field is ignored.\n
+    Model-wide cap on the total Kamino contact capacity.\n
+    When ``max_contacts_per_world`` is None, the per-world geometry-based
+    estimates are scaled down proportionally so that their sum does not exceed
+    this value; otherwise this field is ignored.\n
+    Applies to both internal collision detection and contacts converted from a
+    Newton ``CollisionPipeline``. A ``Model.rigid_contact_max`` that is already
+    set, by the user or by an existing ``CollisionPipeline``, caps the total in
+    the same way.\n
     Defaults to ``None``, leaving the geometry-based estimate uncapped.
     """
 
     max_contacts_per_world: int | None = None
     """
-    Per-world contact buffer capacity override.\n
-    When set, allocates ``max_contacts_per_world`` contacts for every world
-    (``num_worlds * max_contacts_per_world`` total), bypassing the
-    geometry-based estimate and ``max_contacts``.\n
-    Defaults to ``None``.
+    Per-world contact capacity override.\n
+    When set, every world gets ``max_contacts_per_world`` contacts
+    (``num_worlds * max_contacts_per_world`` in total), bypassing the
+    geometry-based estimate and ``max_contacts``. A ``Model.rigid_contact_max``
+    that is already set still caps the total.\n
+    Applies to both internal collision detection and contacts converted from a
+    Newton ``CollisionPipeline``.\n
+    Defaults to ``None``, which sizes each world from its geometry: the sum of
+    its per-shape-pair contact limits, capped at the larger of 1000 and the
+    ``CollisionPipeline`` estimate for that world.
     """
 
     max_contacts_per_pair: int | None = None
     """
-    The maximum number of contacts to generate per candidate geom-pair.\n
-    Used to compute the total maximum contacts allocated for the model,
-    in conjunction with the total number of candidate geom-pairs.\n
-    Defaults to `DEFAULT_GEOM_PAIR_MAX_CONTACTS` (`12`) if unspecified.
+    Deprecated and ignored.\n
+    Contact capacity is sized by ``max_contacts_per_world`` and ``max_contacts``.\n
+    Defaults to ``None``.
+
+    .. deprecated:: 1.8
+        Setting a value emits a :class:`DeprecationWarning` and has no effect.
     """
 
     max_triangle_pairs: int | None = None
@@ -181,7 +193,6 @@ class CollisionDetectorConfig(ConfigBase):
         from ._src.geometry import BoundingVolumeType, BroadPhaseType, CollisionPipelineType  # noqa: PLC0415
         from ._src.geometry.contacts import (  # noqa: PLC0415
             DEFAULT_GEOM_PAIR_CONTACT_GAP,
-            DEFAULT_GEOM_PAIR_MAX_CONTACTS,
             DEFAULT_TRIANGLE_MAX_PAIRS,
         )
 
@@ -209,8 +220,6 @@ class CollisionDetectorConfig(ConfigBase):
             raise ValueError(f"Invalid max_triangle_pairs: {self.max_triangle_pairs}. Must be non-negative.")
 
         # Check if optional arguments are specified and override with defaults if not
-        if self.max_contacts_per_pair is None:
-            self.max_contacts_per_pair = DEFAULT_GEOM_PAIR_MAX_CONTACTS
         if self.max_triangle_pairs is None:
             self.max_triangle_pairs = DEFAULT_TRIANGLE_MAX_PAIRS
         if self.default_gap is None:
@@ -220,6 +229,13 @@ class CollisionDetectorConfig(ConfigBase):
     def __post_init__(self):
         """Post-initialization to validate configurations."""
         self.validate()
+        if self.max_contacts_per_pair is not None:
+            warnings.warn(
+                "CollisionDetectorConfig(max_contacts_per_pair=...) is deprecated in Newton 1.8 and has no effect; "
+                "use max_contacts_per_world or max_contacts to size Kamino contact buffers.",
+                DeprecationWarning,
+                stacklevel=3,
+            )
 
 
 @dataclass

@@ -92,7 +92,6 @@ single edge or corner, generating only 1 contact point.
 def test_unified_pipeline(
     builder: ModelBuilder,
     expected: dict,
-    max_contacts_per_pair: int = 12,
     margin: float = 0.0,
     rtol: float = 1e-6,
     atol: float = 0.0,

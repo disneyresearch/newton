@@ -516,7 +516,6 @@ class DRLegsBenchmarkWorkload:
             integrator="moreau",
         )
         config.collision_detector.pipeline = "unified"
-        config.collision_detector.max_contacts_per_pair = 8
         config.constraints.alpha = 0.1
         config.padmm.primal_tolerance = 1e-4
         config.padmm.dual_tolerance = 1e-4

@@ -716,6 +716,13 @@ class SolverKamino(SolverBase, CouplingInterface):
         else:
             # Validate the user-provided config. Protects against modifying the config after initialization.
             config.validate()
+        if config.collision_detector is not None and config.collision_detector.max_contacts_per_pair is not None:
+            warnings.warn(
+                "SolverKamino.Config.collision_detector.max_contacts_per_pair is deprecated in Newton 1.8 and has "
+                "no effect; use max_contacts_per_world or max_contacts to size Kamino contact buffers.",
+                DeprecationWarning,
+                stacklevel=2,
+            )
         self._config = config
 
         # Create a Kamino model from the Newton model

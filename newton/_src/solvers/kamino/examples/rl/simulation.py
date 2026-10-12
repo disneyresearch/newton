@@ -259,7 +259,6 @@ class RigidBodySim:
         record_video: bool = False,
         video_folder: str | None = None,
         async_save: bool = True,
-        max_contacts_per_pair: int | None = None,
         max_contacts_per_world: int | None = None,
         render_config: ViewerConfig | None = None,
         collapse_fixed_joints: bool = False,
@@ -328,8 +327,6 @@ class RigidBodySim:
         msg.notif("Building Kamino simulator ...")
 
         # Cap contact counts to limit Delassus matrix size
-        if max_contacts_per_pair is not None:
-            settings.collision_detector.max_contacts_per_pair = max_contacts_per_pair
         if max_contacts_per_world is not None:
             settings.collision_detector.max_contacts_per_world = max_contacts_per_world
 
@@ -1132,7 +1129,6 @@ class RigidBodySim:
         settings.solver.use_fk_solver = False
         settings.solver.use_collision_detector = True
         settings.collision_detector.pipeline = "unified"
-        settings.collision_detector.max_contacts_per_pair = 8
         settings.solver.integrator = "moreau"
         settings.solver.constraints.alpha = 0.1
         settings.solver.padmm.primal_tolerance = 1e-4

@@ -362,7 +362,6 @@ def test_narrowphase(
     testcase: unittest.TestCase,
     builder: ModelBuilder,
     expected: dict,
-    max_contacts_per_pair: int = 12,
     gap: float = 0.0,
     rtol: float = 1e-6,
     atol: float = 0.0,
@@ -843,7 +842,6 @@ class TestPrimitiveNarrowPhase(unittest.TestCase):
             self,
             builder=builder,
             expected=expected,
-            max_contacts_per_pair=2,
             case="sphere_on_sphere_detailed",
             device=self.default_device,
         )

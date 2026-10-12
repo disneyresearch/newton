@@ -4,6 +4,7 @@
 """Unit tests for `geometry/detector.py`"""
 
 import unittest
+import warnings
 
 import numpy as np
 import warp as wp
@@ -56,6 +57,25 @@ class TestCollisionDetectorConfig(unittest.TestCase):
         self.assertEqual(config.pipeline, "primitive")
         self.assertEqual(config.broadphase, "explicit")
         self.assertEqual(config.bvtype, "aabb")
+
+    def test_02_max_contacts_per_pair_is_deprecated(self):
+        """Warn that max_contacts_per_pair is deprecated and keep the resolved capacity unchanged."""
+        model = ModelKamino.from_newton(basics.build_boxes_nunchaku().finalize(self.default_device))
+        with self.assertWarnsRegex(DeprecationWarning, "max_contacts_per_pair") as caught:
+            config = CollisionDetector.Config(max_contacts_per_pair=1)
+        self.assertEqual(caught.filename, __file__)
+        self.assertEqual(
+            ContactCapacity.resolve_from(model, config=config),
+            ContactCapacity.resolve_from(model, config=CollisionDetector.Config()),
+        )
+
+    def test_03_default_config_round_trips_without_warnings(self):
+        """Leave max_contacts_per_pair unset so rebuilding a default config emits no deprecation warning."""
+        config = CollisionDetector.Config()
+        self.assertIsNone(config.max_contacts_per_pair)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", DeprecationWarning)
+            CollisionDetector.Config(**config.__dict__)
 
 
 class TestGeometryCollisionDetector(unittest.TestCase):

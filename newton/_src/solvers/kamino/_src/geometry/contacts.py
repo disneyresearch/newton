@@ -53,7 +53,6 @@ from .keying import build_pair_key2
 
 __all__ = [
     "DEFAULT_GEOM_PAIR_CONTACT_GAP",
-    "DEFAULT_GEOM_PAIR_MAX_CONTACTS",
     "DEFAULT_TRIANGLE_MAX_PAIRS",
     "ContactMode",
     "ContactsKamino",
@@ -75,14 +74,6 @@ wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 ###
 # Constants
 ###
-
-DEFAULT_GEOM_PAIR_MAX_CONTACTS: int = 12
-"""
-The global default for maximum number of contacts per geom-pair.
-Used when allocating contact data without a specified capacity.
-Ignored for mesh-based collisions.
-Set to `12` (with box-box collisions being a prototypical case).
-"""
 
 DEFAULT_TRIANGLE_MAX_PAIRS: int = 1_000_000
 """

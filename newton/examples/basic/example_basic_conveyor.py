@@ -399,7 +399,6 @@ class Example:
             solver_config.use_collision_detector = True
             # The full bag set can briefly exceed 256 contacts at segment seams.
             solver_config.collision_detector.max_contacts_per_world = 384
-            solver_config.collision_detector.max_contacts_per_pair = 4
             solver_config.collision_detector.max_triangle_pairs = 16384
             solver_config.integrator = "moreau"
             solver_config.dvi.max_alternating_iterations = 1

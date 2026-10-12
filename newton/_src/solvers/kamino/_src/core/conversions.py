@@ -166,7 +166,6 @@ def refresh_masked_body_inertia(
 @wp.kernel
 def world_max_contacts_kernel(
     # Inputs:
-    max_contacts_per_pair: int,
     model_shape_type: wp.array[wp.int32],
     model_shape_world: wp.array[wp.int32],
     model_shape_contact_pair: wp.array[wp.vec2i],
@@ -197,8 +196,6 @@ def world_max_contacts_kernel(
         type_b=shape_type_b,
     )
     num_contacts = num_contacts_a + num_contacts_b
-    if max_contacts_per_pair >= 0:
-        num_contacts = min(num_contacts, max_contacts_per_pair)
     wp.atomic_add(world_max_contacts, world_id, num_contacts)
 
 
@@ -1095,11 +1092,7 @@ def write_coeff_kernel(a: wp.array[wp.int32], idx: int, v: int):
 ###
 
 
-def compute_required_contact_capacity(
-    model: Model,
-    max_contacts_per_pair: int | None = None,
-    max_contacts_per_world: int | None = None,
-) -> tuple[int, list[int]]:
+def compute_required_contact_capacity(model: Model) -> tuple[int, list[int]]:
     """
     Computes the required contact capacity for a given Newton model.
 
@@ -1108,11 +1101,6 @@ def compute_required_contact_capacity(
 
     Args:
         model: The Newton model for which to compute the required contact capacity.
-        max_contacts_per_pair: Optional maximum number of contacts to allocate per shape pair.
-            If `None`, no per-pair limit is applied.
-        max_contacts_per_world: Optional maximum number of contacts to allocate per world.
-            If `None`, no per-world limit is applied, otherwise caps the computed
-            per-world requirements at this value.
 
     Returns:
         (model_required_contacts, world_required_contacts):
@@ -1135,7 +1123,6 @@ def compute_required_contact_capacity(
         kernel=world_max_contacts_kernel,
         dim=model.shape_contact_pair_count,
         inputs=[
-            max_contacts_per_pair if max_contacts_per_pair is not None else -1,
             model.shape_type,
             model.shape_world,
             model.shape_contact_pairs,
@@ -1144,10 +1131,6 @@ def compute_required_contact_capacity(
         device=model.device,
     )
     world_max_contacts = world_max_contacts_wp.numpy()
-
-    # Cap per-world totals when a per-world maximum is specified
-    if max_contacts_per_world is not None:
-        world_max_contacts = np.minimum(world_max_contacts, max_contacts_per_world)
 
     # Return the per-world maximum contacts list
     return int(np.sum(world_max_contacts)), world_max_contacts.astype(int).tolist()
