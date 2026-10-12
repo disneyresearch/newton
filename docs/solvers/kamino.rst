@@ -107,6 +107,63 @@ Both support dense and sparse operators and bilateral Schur elimination.
 See the :class:`~newton.solvers.SolverKamino` configuration reference for
 subsolver selection and iteration controls.
 
+PADMM convergence options
+^^^^^^^^^^^^^^^^^^^^^^^^^
+
+Both PADMM backends share the following opt-in options of ``config.padmm``
+(or ``config.padmm_primal``), all of which are disabled by default:
+
+* **Spectral penalty:** ``penalty_update_method="spectral"`` sets the penalty
+  to ``rho = sqrt(m L) (L / m)^p``, where ``m`` and ``L`` are the extreme
+  eigenvalues of the regularized, preconditioned Delassus operator, which are
+  estimated by power iteration at the beginning of each step. The exponent
+  ``p`` starts at ``spectral_power_0`` and is adapted from the ratio of the
+  primal and dual residuals within ``[spectral_power_min, spectral_power_max]``,
+  i.e. ``sqrt(m L) <= rho <= L`` by default. With ``penalty_update_freq=N``,
+  the iterations are performed in blocks of ``N``, after each of which the
+  penalty is updated and the linear system is re-factorized, so larger values
+  reduce the cost of the updates. Unlike ``"balanced"``, the spectral penalty
+  also supports dense dynamics.
+* **Smallest eigenvalue:** By default, ``m`` is the lower bound
+  ``eta + min(P R P)``, which is exact for hyperstatic rigid constraint
+  configurations. ``spectral_min_eigenvalue="inverse"`` refines it by inverse
+  iteration for non-singular configurations, at the cost of
+  ``spectral_inverse_iterations`` linear solves and one additional
+  factorization per step.
+* **Penalty warm-start:** ``penalty_warmstart=True`` starts each step from the
+  last spectral exponent, or the last ``"balanced"`` penalty, of the previous
+  step instead of the initial values.
+* **Velocity warm-start:** ``warmstart_velocity="consistent"`` initializes the
+  augmented constraint velocities from the warm-started impulses of the
+  current step, i.e. projects the De Saxce-corrected velocity
+  ``(D + R) lambda_0 + v_f`` onto the dual cone, at the cost of one
+  matrix-vector product, instead of reusing the velocities cached in the
+  previous step.
+* **Relative tolerances:** ``primal_tolerance_rel``, ``dual_tolerance_rel``,
+  and ``compl_tolerance_rel`` add tolerances proportional to the
+  infinity-norms of the physical impulses, the augmented constraint
+  velocities, and their product, respectively, to the absolute tolerances.
+  They only affect the stopping criterion, not the reported residuals.
+
+For ``"padmm_primal"``, the spectral penalty is the inverse of the dual one,
+and ``primal_tolerance_rel`` and ``dual_tolerance_rel`` are relative to the
+constraint velocities and impulses, respectively. Additionally,
+``config.dynamics.augmented_mass_preconditioner`` selects a symmetric
+``"jacobi"`` or ``"block_jacobi"`` (per-body 6x6 Cholesky) scaling of the
+constraint-augmented mass matrix ``M + J^T W J`` for its linear solves. The
+default ``None`` selects ``"none"`` for dense and ``"jacobi"`` for sparse
+dynamics. The scaling only changes the conditioning of the linear solves, not
+the PADMM iterates.
+
+.. code-block:: python
+
+   config = newton.solvers.SolverKamino.Config()
+   config.padmm.penalty_update_method = "spectral"
+   config.padmm.penalty_update_freq = 10
+   config.padmm.primal_tolerance_rel = 1e-4
+   config.padmm.dual_tolerance_rel = 1e-4
+   config.padmm.compl_tolerance_rel = 1e-4
+
 Constraint compliance
 ---------------------
 
@@ -160,8 +217,8 @@ residual definitions are backend-specific:
   violation [J].
 
 These are absolute maxima: neither backend divides them by a reference norm,
-constraint count, or tolerance. Additional fields are not portable between
-backends.
+constraint count, or tolerance, including when the PADMM relative tolerances
+are enabled. Additional fields are not portable between backends.
 
 .. code-block:: python
 
