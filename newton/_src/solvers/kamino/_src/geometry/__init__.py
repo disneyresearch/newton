@@ -19,6 +19,10 @@ This module provides a front-end defined by:
     serves as the container with which collision detection pipelines operate,
     storing all generated contacts.
 
+- :class:`ContactCapacity`:
+    An immutable set of per-world contact capacities, together with the single
+    rule that resolves them for every contact allocation of a simulation.
+
 - :class:`CollisionDetector`:
     A high-level interface for wrapping collision detection pipelines (i.e. backends).
     This class provides a unified interface for performing collision detection
@@ -47,6 +51,7 @@ This module provides a front-end defined by:
 """
 
 from .aggregation import ContactAggregation, ContactAggregationData
+from .capacity import ContactCapacity
 from .contacts import ContactMode, ContactsKamino, ContactsKaminoData
 from .detector import (
     BroadPhaseType,
@@ -69,6 +74,7 @@ __all__ = [
     "CollisionPipelineUnifiedKamino",
     "ContactAggregation",
     "ContactAggregationData",
+    "ContactCapacity",
     "ContactMode",
     "ContactsKamino",
     "ContactsKaminoData",
