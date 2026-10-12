@@ -21,7 +21,7 @@ from ...core.math import FLOAT32_MAX
 from ...core.model import ModelKamino
 from ...core.size import SizeKamino
 from ...dynamics.problem import ConstrainedDynamicsProblem
-from ...dynamics.spectral import make_problem_operator
+from ...dynamics.spectral import make_problem_operator, make_problem_solve_fn
 from ...geometry.contacts import ContactsKamino
 from ...kinematics.limits import LimitsKamino
 from ...linalg.eigen import PowerIteration
@@ -36,11 +36,13 @@ from .kernels import (
     _compute_projection_argument,
     _compute_solution_vectors,
     _compute_spectral_lower_bound,
+    _compute_spectral_shift,
     _compute_velocity_bias,
     _initialize_spectral_penalty,
     _make_compute_infnorm_residuals_kernel,
     _make_project_dual_convergence_accel_kernel,
     _project_to_feasible_cone,
+    _refine_spectral_lower_bound,
     _reset_solver_data,
     _scale_warmstart_forces,
     _update_problem_proximal_regularization,
@@ -153,6 +155,10 @@ class PADMMSolver:
         self._spectral_lower_bound: wp.array[wp.float32] | None = None
         self._spectral_power_iteration: PowerIteration | None = None
         self._spectral_problem: ConstrainedDynamicsProblem | None = None
+        self._use_spectral_inverse: bool = False
+        self._spectral_inverse_iterations: int = 0
+        self._spectral_inverse_mask: wp.array[wp.bool] | None = None
+        self._spectral_shift: wp.array[wp.float32] | None = None
 
         # Declare the model size cache
         self._size: SizeKamino | None = None
@@ -279,6 +285,10 @@ class PADMMSolver:
         self._spectral_lower_bound = None
         self._spectral_power_iteration = None
         self._spectral_problem = None
+        self._use_spectral_inverse = False
+        self._spectral_inverse_iterations = 0
+        self._spectral_inverse_mask = None
+        self._spectral_shift = None
         if self._use_spectral_penalty:
             update_freqs = {c.penalty_update_freq for c in spectral_configs}
             if len(update_freqs) > 1:
@@ -288,9 +298,20 @@ class PADMMSolver:
             self._spectral_update_freq = update_freqs.pop()
             self._spectral_max_iterations = max(c.spectral_max_iterations for c in spectral_configs)
             self._spectral_tolerance = min(c.spectral_tolerance for c in spectral_configs)
+            inverse = [
+                m == PADMMPenaltyUpdate.SPECTRAL and c.spectral_min_eigenvalue == "inverse"
+                for c, m in zip(self._config, methods, strict=True)
+            ]
+            self._use_spectral_inverse = any(inverse)
+            self._spectral_inverse_iterations = max(
+                (c.spectral_inverse_iterations for c, i in zip(self._config, inverse, strict=True) if i), default=0
+            )
             with wp.ScopedDevice(self._device):
                 self._spectral_mask = wp.array([m == PADMMPenaltyUpdate.SPECTRAL for m in methods], dtype=wp.bool)
                 self._spectral_lower_bound = wp.zeros(shape=(self._size.num_worlds,), dtype=wp.float32)
+                if self._use_spectral_inverse:
+                    self._spectral_inverse_mask = wp.array(inverse, dtype=wp.bool)
+                    self._spectral_shift = wp.zeros(shape=(self._size.num_worlds,), dtype=wp.float32)
 
         # Compute the largest max iterations across all worlds
         # NOTE: This is needed to allocate the solver
@@ -628,7 +649,11 @@ class PADMMSolver:
 
         The largest eigenvalue is estimated by power iteration, warm-started from the previous solve,
         while the smallest one is bounded from below by `eta + min(P R P)`, since `D` is positive semi-definite
-        and in general singular, e.g. for hyperstatic constraint configurations.
+        and in general singular, e.g. for hyperstatic constraint configurations. Optionally, the smallest
+        eigenvalue is then refined by inverse iteration, using the linear system of the problem regularized
+        with the penalty initialized from the lower bound, e.g. using the existing factorization of the
+        augmented Delassus matrix for the dual problem, or of the augmented mass matrix via the Woodbury
+        identity for the primal problem.
 
         Args:
             problem: The forward dynamics problem to be solved.
@@ -661,6 +686,45 @@ class PADMMSolver:
             outputs=[self._data.penalty, self._data.state.sigma],
             device=self.device,
         )
+
+        # Optionally refine the smallest eigenvalue by inverse iteration with the regularized operator,
+        # factorized (or updated) with the penalty initialized from the lower bound, and re-initialize the penalty
+        if self._use_spectral_inverse:
+            self._update_regularization(problem)
+            wp.launch(
+                kernel=_compute_spectral_shift,
+                dim=self._size.num_worlds,
+                inputs=[self._data.config, self._data.penalty],
+                outputs=[self._spectral_shift],
+                device=self.device,
+            )
+            lambda_min = self._spectral_power_iteration.compute_min(
+                method="inverse",
+                shift=self._spectral_shift,
+                solve_fn=make_problem_solve_fn(problem),
+                world_mask=self._spectral_inverse_mask,
+                max_iterations=self._spectral_inverse_iterations,
+            )
+            wp.launch(
+                kernel=_refine_spectral_lower_bound,
+                dim=self._size.num_worlds,
+                inputs=[self._spectral_inverse_mask, lambda_min],
+                outputs=[self._spectral_lower_bound],
+                device=self.device,
+            )
+            wp.launch(
+                kernel=_initialize_spectral_penalty,
+                dim=self._size.num_worlds,
+                inputs=[
+                    problem.data.dim,
+                    self._data.config,
+                    self._spectral_inverse_mask,
+                    lambda_max,
+                    self._spectral_lower_bound,
+                ],
+                outputs=[self._data.penalty, self._data.state.sigma],
+                device=self.device,
+            )
 
     def _update_spectral_penalty(self, problem: ConstrainedDynamicsProblem):
         """

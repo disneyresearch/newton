@@ -1,0 +1,1 @@
+Add the option to refine the smallest eigenvalue of the `"spectral"` PADMM penalty of `SolverKamino` by inverse iteration with the factorized linear system via `SolverKamino.Config.padmm.spectral_min_eigenvalue`.

@@ -427,6 +427,40 @@ def _initialize_spectral_penalty(
 
 
 @wp.kernel
+def _compute_spectral_shift(
+    # Inputs:
+    solver_config: wp.array[PADMMConfigStruct],
+    solver_penalty: wp.array[PADMMPenalty],
+    # Outputs:
+    shift: wp.array[wp.float32],
+):
+    # Retrieve the world index as the thread index
+    wid = wp.tid()
+
+    # The regularized operator of the problem is shifted by the total proximal regularization
+    shift[wid] = solver_config[wid].eta + solver_penalty[wid].rho
+
+
+@wp.kernel
+def _refine_spectral_lower_bound(
+    # Inputs:
+    spectral_mask: wp.array[wp.bool],
+    lambda_min: wp.array[wp.float32],
+    # Outputs:
+    lower_bound: wp.array[wp.float32],
+):
+    # Retrieve the world index as the thread index
+    wid = wp.tid()
+
+    # Skip if the world does not refine its spectral estimates
+    if not spectral_mask[wid]:
+        return
+
+    # Retain the larger of the lower bound and of the (approximate) estimate of the smallest eigenvalue
+    lower_bound[wid] = wp.max(lower_bound[wid], lambda_min[wid])
+
+
+@wp.kernel
 def _update_spectral_penalty(
     # Inputs:
     solver_config: wp.array[PADMMConfigStruct],

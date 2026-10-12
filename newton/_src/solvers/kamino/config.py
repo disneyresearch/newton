@@ -670,7 +670,8 @@ class PADMMSolverConfig:
       residuals exceeds `alpha`. Requires sparse dynamics.
     - `spectral`: The penalty is computed as `rho = sqrt(m * L) * kappa^p` from the extreme
       eigenvalues `m`, `L` of the regularized (preconditioned) Delassus operator, with
-      `kappa = L / m`, which are estimated at the beginning of each solve. The exponent `p` starts
+      `kappa = L / m`, which are estimated at the beginning of each solve (see
+      `spectral_max_iterations` and `spectral_min_eigenvalue`). The exponent `p` starts
       at `spectral_power_0` and is adapted from the residual ratio w.r.t. `alpha` (see
       `spectral_power_inc` and `spectral_power_dec`). The initial penalty `rho_0` is ignored.\n
     Defaults to `fixed`. See :class:`PADMMPenaltyUpdate` for details.
@@ -707,6 +708,25 @@ class PADMMSolverConfig:
     """
     The relative tolerance on the change of the eigenvalue estimates of the power iterations.\n
     Must be non-negative. Defaults to `1e-3`.
+    """
+
+    spectral_min_eigenvalue: Literal["bound", "inverse"] = "bound"
+    """
+    The estimation method of the smallest eigenvalue `m` of the `spectral` penalty:\n
+    - `bound`: The lower bound `eta + min(P R P)`, which is exact for hyperstatic (i.e. rank-deficient)
+      rigid constraint configurations, and requires no additional computations.
+    - `inverse`: Inverse iteration with the regularized operator `P (D + R) P + (eta + rho) I`,
+      factorized with the penalty `rho` initialized from the lower bound, which refines `m` for
+      non-singular constraint configurations, at the cost of `spectral_inverse_iterations` linear
+      solves and one additional factorization (or update) of the linear system per solve.\n
+    Defaults to `bound`.
+    """
+
+    spectral_inverse_iterations: int = 5
+    """
+    The maximum number of inverse iterations used to refine the smallest eigenvalue `m` of the
+    `spectral` penalty when `spectral_min_eigenvalue` is `inverse`.\n
+    Must be greater than zero. Defaults to `5`.
     """
 
     linear_solver_tolerance: float = 0.0
@@ -947,6 +967,15 @@ class PADMMSolverConfig:
             )
         if self.spectral_tolerance < 0.0:
             raise ValueError(f"Invalid spectral tolerance: {self.spectral_tolerance}. Must be non-negative.")
+        if self.spectral_min_eigenvalue not in ("bound", "inverse"):
+            raise ValueError(
+                f"Invalid spectral min eigenvalue method: {self.spectral_min_eigenvalue}. "
+                "Must be one of ('bound', 'inverse')."
+            )
+        if self.spectral_inverse_iterations <= 0:
+            raise ValueError(
+                f"Invalid spectral inverse iterations: {self.spectral_inverse_iterations}. Must be a positive integer."
+            )
 
         # Ensure that the enum-valued parameters are valid options
         # Conversion to enum-type configs will raise an error

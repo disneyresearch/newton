@@ -24,6 +24,7 @@ from newton._src.solvers.kamino.config import (
 )
 from newton.solvers import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
+from newton.tests.kamino.utils.extract import extract_delassus
 from newton.tests.kamino.utils.make import make_containers, update_containers
 from newton.tests.utils import basics
 
@@ -253,7 +254,50 @@ class TestPADMMPrimalSolver(unittest.TestCase):
                         spectral_tolerance=1e-6,
                     )
 
-    def test_05_solve_converges(self):
+    def test_05_inverse_iteration_refines_spectral_bounds(self):
+        """
+        Checks that inverse iteration refines the smallest eigenvalue of the spectral penalty
+        for non-singular, but not for hyperstatic (i.e. singular) constraint configurations.
+        """
+        eta = 1e-3
+        common = {
+            "eta": eta,
+            "penalty_update_method": "spectral",
+            "penalty_update_freq": 0,
+            "max_iterations": 1,
+            "spectral_max_iterations": 200,
+            "spectral_tolerance": 1e-6,
+            "spectral_inverse_iterations": 50,
+        }
+        for builder_fn, hyperstatic in ((basics.build_box_pendulum, False), (basics.build_box_on_plane, True)):
+            for sparse in (False, True):
+                test = TestSetup(builder_fn, self.default_device, sparse=sparse)
+                D_w = [D.copy() for D in extract_delassus(test.dual.delassus, only_active_dims=True)]
+                for name, solver_type, config_type, problem in (
+                    ("dual", PADMMSolver, PADMMSolverConfig, test.dual),
+                    ("primal", PADMMPrimalSolver, PADMMPrimalSolverConfig, test.primal),
+                ):
+                    for method in ("bound", "inverse"):
+                        with self.subTest(builder=builder_fn.__name__, sparse=sparse, problem=name, method=method):
+                            config = config_type(spectral_min_eigenvalue=method, **common)
+                            solver = solver_type(model=test.model, config=config, use_graph_conditionals=False)
+                            solver.coldstart()
+                            solver.solve(problem=problem)
+                            m = solver.data.penalty.numpy()[0]["m"]
+                            lambda_min = np.linalg.eigvalsh(D_w[0].astype(np.float64))[0]
+                            if hyperstatic:
+                                self.assertLess(abs(lambda_min), 1e-4)
+                            else:
+                                self.assertGreater(lambda_min, 1e-2)
+                            if method == "bound":
+                                np.testing.assert_allclose(m, eta, rtol=1e-2)
+                            elif hyperstatic:
+                                # The inverse iteration is limited by the shift and the float32 precision
+                                np.testing.assert_allclose(m, eta, rtol=0.2)
+                            else:
+                                np.testing.assert_allclose(m, lambda_min + eta, rtol=1e-2)
+
+    def test_06_solve_converges(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 test = TestSetup(basics.build_box_on_plane, self.default_device, sparse=sparse)

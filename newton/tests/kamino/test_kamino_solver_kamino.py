@@ -445,6 +445,8 @@ class TestSolverKaminoConfig(unittest.TestCase):
             {"spectral_power_dec": -0.1},
             {"spectral_max_iterations": 0},
             {"spectral_tolerance": -1.0},
+            {"spectral_min_eigenvalue": "lanczos"},
+            {"spectral_inverse_iterations": 0},
         ):
             with self.subTest(**kwargs), self.assertRaises(ValueError):
                 kamino_config.PADMMSolverConfig(penalty_update_method="spectral", **kwargs)
