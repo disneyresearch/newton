@@ -16,7 +16,12 @@ from newton._src.solvers.kamino._src.dynamics.primal import PrimalProblem
 from newton._src.solvers.kamino._src.linalg import ConjugateResidualSolver, LLTBlockedSolver
 from newton._src.solvers.kamino._src.solvers.padmm import PADMMSolver
 from newton._src.solvers.kamino._src.solvers.padmm_primal import PADMMPrimalSolver
-from newton._src.solvers.kamino.config import ConstraintComplianceConfig, PADMMPrimalSolverConfig, PADMMSolverConfig
+from newton._src.solvers.kamino.config import (
+    ConstrainedDynamicsConfig,
+    ConstraintComplianceConfig,
+    PADMMPrimalSolverConfig,
+    PADMMSolverConfig,
+)
 from newton.solvers import SolverKamino
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.utils.make import make_containers, update_containers
@@ -222,7 +227,18 @@ class TestPADMMPrimalSolver(unittest.TestCase):
                     self.assertTrue(np.any(test.primal.data.R.numpy() > 0.0))
                     self._check_iterates_match_dual_padmm(test, use_acceleration)
 
-    def test_03_solve_converges(self):
+    def test_03_iterates_match_dual_padmm_with_augmented_mass_preconditioning(self):
+        for preconditioner in ("none", "jacobi", "block_jacobi"):
+            config = DualProblem.Config(
+                dynamics=ConstrainedDynamicsConfig(augmented_mass_preconditioner=preconditioner)
+            )
+            for sparse in (False, True):
+                with self.subTest(preconditioner=preconditioner, sparse=sparse):
+                    test = TestSetup(basics.build_boxes_fourbar, self.default_device, sparse=sparse, config=config)
+                    self.assertEqual(test.primal.operator.preconditioner, preconditioner)
+                    self._check_iterates_match_dual_padmm(test, use_acceleration=True)
+
+    def test_04_solve_converges(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 test = TestSetup(basics.build_box_on_plane, self.default_device, sparse=sparse)

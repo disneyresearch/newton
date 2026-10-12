@@ -66,7 +66,11 @@ from ..core.model import ModelKamino
 from ..geometry.contacts import ContactsKamino
 from ..kinematics.limits import LimitsKamino
 from ..linalg import LinearSolverType
-from .augmented_mass import AugmentedMassOperator, BlockSparseMatrixFreeAugmentedMassOperator
+from .augmented_mass import (
+    AugmentedMassOperator,
+    AugmentedMassPreconditioner,
+    BlockSparseMatrixFreeAugmentedMassOperator,
+)
 from .config import ProblemFormulation
 from .operators import (
     compliant_delassus_gemv,
@@ -321,12 +325,20 @@ class PrimalProblem(ConstrainedDynamicsProblem):
         self._model = model
         self._system_data = data
         self._jacobians = jacobians
+        preconditioner = self._resolve_augmented_mass_preconditioner()
         if self._sparse:
             self._operator = BlockSparseMatrixFreeAugmentedMassOperator(
-                model=model, data=data, jacobians=jacobians, solver=solver, solver_kwargs=solver_kwargs
+                model=model,
+                data=data,
+                jacobians=jacobians,
+                solver=solver,
+                solver_kwargs=solver_kwargs,
+                preconditioner=preconditioner,
             )
         else:
-            self._operator = AugmentedMassOperator(model=model, solver=solver, solver_kwargs=solver_kwargs)
+            self._operator = AugmentedMassOperator(
+                model=model, solver=solver, solver_kwargs=solver_kwargs, preconditioner=preconditioner
+            )
 
         with wp.ScopedDevice(self._device):
             self._data.W = wp.zeros(shape=(model.size.sum_of_max_total_cts,), dtype=wp.float32)
@@ -402,6 +414,21 @@ class PrimalProblem(ConstrainedDynamicsProblem):
             inputs=[self._data.dim, self._data.vio, self._data.P, self._data.W, v, self._c_tmp, x],
             device=self.device,
         )
+
+    def _resolve_augmented_mass_preconditioner(self) -> AugmentedMassPreconditioner:
+        """
+        Returns the preconditioner of the augmented mass matrix configured for all worlds, defaulting
+        to no preconditioning for dense and to the Jacobi preconditioner for sparse problems.
+        """
+        preconditioners = {c.dynamics.augmented_mass_preconditioner for c in self._config}
+        if len(preconditioners) > 1:
+            raise ValueError(
+                f"All worlds must use the same augmented mass preconditioner, got {sorted(map(str, preconditioners))}."
+            )
+        preconditioner = preconditioners.pop()
+        if preconditioner is None:
+            preconditioner = "jacobi" if self._sparse else "none"
+        return preconditioner
 
     def _gemv_impl(
         self,

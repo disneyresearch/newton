@@ -470,6 +470,18 @@ class ConstrainedDynamicsConfig(ConfigBase):
     Defaults to an empty dictionary.
     """
 
+    augmented_mass_preconditioner: Literal["none", "jacobi", "block_jacobi"] | None = None
+    """
+    The symmetric preconditioner ``S`` applied to the constraint-augmented generalized mass matrix
+    ``A = M + J^T W J`` of the primal problem, whose linear systems are solved via ``S^T A S``.
+    Only used by the primal formulation (i.e. the `"padmm_primal"` dynamics solver).\n
+    - `"none"`: No preconditioning.
+    - `"jacobi"`: Diagonal scaling ``S = diag(A)^{-1/2}``.
+    - `"block_jacobi"`: Scaling with the inverse transposed Cholesky factors of the 6x6 body
+      blocks of ``A``, i.e. normalizing the mass and inertia of each body.\n
+    Defaults to `None`, selecting `"none"` for dense and `"jacobi"` for sparse problems.
+    """
+
     cull_speculative_contacts: bool = True
     """
     Whether to cull speculative (= separated) contacts in the dynamics solve.
@@ -542,6 +554,14 @@ class ConstrainedDynamicsConfig(ConfigBase):
             raise ValueError(
                 f"Invalid linear_solver_type: {self.linear_solver_type}. "
                 f"Must be one of {supported_linear_solver_types}."
+            )
+
+        # Ensure that the augmented mass matrix preconditioner is a valid option
+        supported_preconditioners = (None, "none", "jacobi", "block_jacobi")
+        if self.augmented_mass_preconditioner not in supported_preconditioners:
+            raise ValueError(
+                f"Invalid augmented_mass_preconditioner: {self.augmented_mass_preconditioner}. "
+                f"Must be one of {supported_preconditioners}."
             )
 
     @override

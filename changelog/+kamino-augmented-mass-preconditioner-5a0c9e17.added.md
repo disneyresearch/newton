@@ -1,0 +1,1 @@
+Add an optional `"jacobi"` or `"block_jacobi"` preconditioner of the constraint-augmented mass matrix to the `"padmm_primal"` backend of `SolverKamino` via `SolverKamino.Config.dynamics.augmented_mass_preconditioner`.
