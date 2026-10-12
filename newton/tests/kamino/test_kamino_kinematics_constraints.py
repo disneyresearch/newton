@@ -86,7 +86,6 @@ class TestKinematicsConstraints(unittest.TestCase):
         # Construct and allocate the contacts container
         contacts = ContactsKamino(capacity=required_world_max_contacts, device=self.default_device)
         if self.verbose:
-            print("contacts.default_max_world_contacts: ", contacts.default_max_world_contacts)
             print("contacts.model_max_contacts_host: ", contacts.model_max_contacts_host)
             print("contacts.world_max_contacts_host: ", contacts.world_max_contacts_host)
 
@@ -138,7 +137,6 @@ class TestKinematicsConstraints(unittest.TestCase):
         # Construct and allocate the contacts container
         contacts = ContactsKamino(capacity=required_world_max_contacts, device=self.default_device)
         if self.verbose:
-            print("contacts.default_max_world_contacts: ", contacts.default_max_world_contacts)
             print("contacts.model_max_contacts_host: ", contacts.model_max_contacts_host)
             print("contacts.world_max_contacts_host: ", contacts.world_max_contacts_host)
 
@@ -238,7 +236,6 @@ class TestKinematicsConstraints(unittest.TestCase):
         # Construct and allocate the contacts container
         contacts = ContactsKamino(capacity=required_world_max_contacts, device=self.default_device)
         if self.verbose:
-            print("contacts.default_max_world_contacts: ", contacts.default_max_world_contacts)
             print("contacts.model_max_contacts_host: ", contacts.model_max_contacts_host)
             print("contacts.world_max_contacts_host: ", contacts.world_max_contacts_host)
 

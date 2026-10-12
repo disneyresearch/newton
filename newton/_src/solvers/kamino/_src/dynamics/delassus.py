@@ -29,7 +29,7 @@ Typical usage example:
     model = ModelKamino.from_newton(builder.finalize())
     data = model.data()
     limits = LimitsKamino(model)
-    contacts = ContactsKamino(model)
+    contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=model.device)
     jacobians = DenseSystemJacobians(model, limits, contacts)
 
     # Define a linear solver type to use as a back-end for the
@@ -1266,7 +1266,7 @@ class BlockSparseMatrixFreeDelassusOperator(BlockSparseLinearOperators[wp.float3
         model = ModelKamino.from_newton(builder.finalize())
         data = model.data()
         limits = LimitsKamino(model)
-        contacts = ContactsKamino(model)
+        contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=model.device)
         jacobians = SparseSystemJacobians(model, limits, contacts)
 
         # Build the Jacobians for the model and active limits and contacts

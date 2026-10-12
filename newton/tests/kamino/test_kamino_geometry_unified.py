@@ -15,6 +15,7 @@ import warp as wp
 from newton import ModelBuilder
 from newton._src.solvers.kamino._src.core.data import DataKamino
 from newton._src.solvers.kamino._src.core.model import ModelKamino
+from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity
 from newton._src.solvers.kamino._src.geometry.contacts import ContactsKamino
 from newton._src.solvers.kamino._src.geometry.unified import CollisionPipelineUnifiedKamino
 from newton._src.solvers.kamino._src.utils import logger as msg
@@ -107,7 +108,7 @@ def test_unified_pipeline(
     # Create a test model and data
     model: ModelKamino = ModelKamino.from_newton(builder.finalize(device))
     data: DataKamino = model.data()
-    contacts = ContactsKamino(model=model, device=device)
+    contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=device)
 
     # Run the narrow-phase test over each broad-phase backend
     if broadphase_modes is None:

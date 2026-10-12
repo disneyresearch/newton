@@ -49,7 +49,7 @@ A typical example for using this module is:
     model = ModelKamino.from_newton(builder.finalize())
     data = model.data()
     limits = LimitsKamino(model)
-    contacts = ContactsKamino(model)
+    contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=model.device)
     jacobians = DenseSystemJacobians(model, limits, contacts)
 
     # Build the Jacobians for the model and active limits and contacts

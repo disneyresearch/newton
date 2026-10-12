@@ -36,7 +36,7 @@ A typical example for using this module is:
     state_p = model.state()
     data = model.data()
     limits = LimitsKamino(model)
-    contacts = ContactsKamino(model)
+    contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=model.device)
     jacobians = DenseSystemJacobians(model, limits, contacts)
 
     # Build the Jacobians for the model and active limits and contacts

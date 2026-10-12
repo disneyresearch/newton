@@ -26,6 +26,8 @@ supporting both a Z-up and X-up convention.
 from __future__ import annotations
 
 import functools
+import numbers
+from collections.abc import Iterable, Sequence
 from dataclasses import dataclass, field
 from enum import IntEnum
 from typing import Literal
@@ -38,11 +40,11 @@ from .....sim.model import Model
 from .....sim.state import State
 from ..core.bodies import is_immovable_for_kamino
 from ..core.materials import MaterialMixMode, make_get_mixed_material_pair_property
-from ..core.model import ModelKamino
 from ..core.types import (
     to_warp_int32_array,
 )
 from ..utils import logger as msg
+from .capacity import ContactCapacity
 from .keying import build_pair_key2
 
 ###
@@ -53,7 +55,6 @@ __all__ = [
     "DEFAULT_GEOM_PAIR_CONTACT_GAP",
     "DEFAULT_GEOM_PAIR_MAX_CONTACTS",
     "DEFAULT_TRIANGLE_MAX_PAIRS",
-    "DEFAULT_WORLD_MAX_CONTACTS",
     "ContactMode",
     "ContactsKamino",
     "ContactsKaminoData",
@@ -74,13 +75,6 @@ wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 ###
 # Constants
 ###
-
-DEFAULT_WORLD_MAX_CONTACTS: int = 128
-"""
-The global default for maximum number of contacts per world.
-Used when allocating contact data without a specified capacity.
-Set to `128`.
-"""
 
 DEFAULT_GEOM_PAIR_MAX_CONTACTS: int = 12
 """
@@ -506,9 +500,8 @@ class ContactsKamino:
 
     def __init__(
         self,
-        model: ModelKamino | None = None,
-        capacity: int | list[int] | None = None,
-        default_max_contacts: int | None = None,
+        capacity: ContactCapacity | int | Sequence[int] | None = None,
+        *,
         device: wp.DeviceLike = None,
         remappable: bool = False,
     ):
@@ -516,21 +509,11 @@ class ContactsKamino:
         Initializes a new ContactsKamino container.
 
         Args:
-            model:
-                The model container holding the time-invariant data of the system being simulated.
-                If provided, the contacts will be finalized using the contact allocation meta-data of the model.
-                Cannot be specified together with `capacity`.
-                If `None``, and `capacity` is also `None`, the contacts will be created empty without
-                allocating data, and can be finalized later by providing model/capacity to `finalize`.
             capacity:
-                The maximum number of contacts to allocate if no model is provided.
-                If an integer is provided, it specifies the capacity for a single world.
-                If a list of integers is provided, it specifies the capacity for each world.
-                Cannot be specified together with `model`.
-            default_max_contacts:
-                The default maximum number of contacts per world, if no model and no positive capacity
-                are provided.
-                If `None`, uses the default value of 128.
+                The contact capacity to allocate, given either as a :class:`ContactCapacity`,
+                as a sequence of per-world capacities, or as a single integer for a single world.
+                Capacities are used as given, so a zero allocates no contacts for that world.
+                If `None`, the container is created empty and can be allocated later with :meth:`finalize`.
             device:
                 The device on which to allocate the contacts data.
             remappable:
@@ -539,11 +522,6 @@ class ContactsKamino:
                 contacts need to be converted from/to Newton contacts (e.g. if Kamino is used
                 through the Newton API).
         """
-        # Declare and initialize the default maximum number of contacts per world
-        self._default_max_world_contacts: int = DEFAULT_WORLD_MAX_CONTACTS
-        if default_max_contacts is not None:
-            self._default_max_world_contacts = default_max_contacts
-
         # Cache the target device for all memory allocations
         self._device: wp.DeviceLike = None
 
@@ -551,32 +529,12 @@ class ContactsKamino:
         self._data: ContactsKaminoData = ContactsKaminoData()
 
         # If a capacity is specified, finalize the contacts data allocation
-        if model is not None or capacity is not None:
-            self.finalize(model=model, capacity=capacity, device=device, remappable=remappable)
+        if capacity is not None:
+            self.finalize(capacity, device=device, remappable=remappable)
 
     ###
     # Properties
     ###
-
-    @property
-    def default_max_world_contacts(self) -> int:
-        """
-        Returns the default maximum number of contacts per world.
-        This value is used when the capacity at allocation-time is unspecified or equals 0.
-        """
-        return self._default_max_world_contacts
-
-    @default_max_world_contacts.setter
-    def default_max_world_contacts(self, max_contacts: int):
-        """
-        Sets the default maximum number of contacts per world.
-
-        Args:
-            max_contacts: The maximum number of contacts per world.
-        """
-        if max_contacts < 0:
-            raise ValueError("max_contacts must be a non-negative integer")
-        self._default_max_world_contacts = max_contacts
 
     @property
     def device(self) -> wp.DeviceLike:
@@ -588,9 +546,8 @@ class ContactsKamino:
     @property
     def data(self) -> ContactsKaminoData:
         """
-        Returns the managed contacts data container.
+        Returns the managed contacts data container, whose arrays are `None` when no contacts are allocated.
         """
-        self._assert_has_data()
         return self._data
 
     @property
@@ -598,8 +555,8 @@ class ContactsKamino:
         """
         Returns the host-side cache of the maximum number of contacts allocated across all worlds.
         Intended for managing data allocations and setting thread sizes in kernels.
+        It is zero when no contacts are allocated.
         """
-        self._assert_has_data()
         return self._data.model_max_contacts_host
 
     @property
@@ -608,7 +565,6 @@ class ContactsKamino:
         Returns the host-side cache of the maximum number of contacts allocated per world.
         Intended for managing data allocations and setting thread sizes in kernels.
         """
-        self._assert_has_data()
         return self._data.world_max_contacts_host
 
     @property
@@ -801,85 +757,36 @@ class ContactsKamino:
 
     def finalize(
         self,
-        model: ModelKamino | None = None,
-        capacity: int | list[int] | None = None,
+        capacity: ContactCapacity | int | Sequence[int],
+        *,
         device: wp.DeviceLike = None,
         remappable: bool = False,
     ):
         """
-        Finalizes the contacts data allocations based on the specified model or capacity.
+        Finalizes the contacts data allocations based on the specified capacity.
 
         Args:
-            model:
-                The model container holding the time-invariant data of the system being simulated.
-                If provided, the contacts will be finalized using the contact allocation meta-data of the model.
-                Cannot be specified together with `capacity`.
             capacity:
-                The maximum number of contacts to allocate if no model is provided.
-                If an integer is provided, it specifies the capacity for a single world.
-                If a list of integers is provided, it specifies the capacity for each world.
-                Cannot be specified together with `model`.
+                The contact capacity to allocate, given either as a :class:`ContactCapacity`,
+                as a sequence of per-world capacities, or as a single integer for a single world.
+                Capacities are used as given, so a zero allocates no contacts for that world.
             device:
-                The device on which to allocate the contacts data, if no model is provided.
+                The device on which to allocate the contacts data.
             remappable:
                 Whether to allocate a buffer necessary for consistent mapping of Kamino and Newton
                 contacts during conversions. Defaults to `False`, to be set to `True` if these
                 contacts need to be converted from/to Newton contacts (e.g. if Kamino is used
                 through the Newton API).
         """
-        # Raise errors if both model and capacity are provided or both are None
-        if model is not None and capacity is not None:
-            raise ValueError("Expected either 'model' or 'capacity' argument to be provided, but not both.")
-        if model is None and capacity is None:
-            raise ValueError("Expected either 'model' or 'capacity' argument to be provided, but got neither")
+        capacity = _as_contact_capacity(capacity)
+        self._device = device
+        model_max_contacts = capacity.model_max_contacts
+        world_max_contacts = list(capacity.world_max_contacts)
 
-        # The memory allocation requires the total number of contacts (over multiple worlds)
-        # as well as the contacts capacities for each world. Corresponding sizes are defaulted to 0 (empty).
-        model_max_contacts = 0
-        world_max_contacts = [0]
-
-        # If a model is provided, extract the required contacts capacity from that
-        if model is not None:
-            model_max_contacts: int = 0
-            world_max_contacts: list[int] = [0 for _ in range(model.size.num_worlds)]
-            if model.geoms.model_minimum_contacts > 0:
-                model_max_contacts = model.geoms.model_minimum_contacts
-                world_max_contacts = model.geoms.world_minimum_contacts
-            else:
-                num_worlds = model.size.num_worlds
-                world_max_contacts = [model_max_contacts // num_worlds] * num_worlds
-            capacity = world_max_contacts
-            self._device = model.device
-        else:
-            self._device = device
-
-        # If the capacity is a list, this means we are allocating for multiple worlds
-        if isinstance(capacity, list):
-            if len(capacity) == 0:
-                raise ValueError("`capacity` must be an non-empty list")
-            for i in range(len(capacity)):
-                if capacity[i] < 0:
-                    raise ValueError(f"`capacity[{i}]` must be a non-negative integer")
-                if capacity[i] == 0:
-                    capacity[i] = self._default_max_world_contacts
-            model_max_contacts = sum(capacity)
-            world_max_contacts = capacity
-
-        # If the capacity is a single integer, this means we are allocating for a single world
-        elif isinstance(capacity, int):
-            if capacity < 0:
-                raise ValueError("`capacity` must be a non-negative integer")
-            if capacity == 0:
-                capacity = self._default_max_world_contacts
-            model_max_contacts = capacity
-            world_max_contacts = [capacity]
-
-        else:
-            raise TypeError("`capacity` must be an integer or a list of integers")
-
-        # Skip allocation if there are no contacts to allocate
+        # Keep the per-world sizes queryable even when there are no contacts to allocate
         if model_max_contacts == 0:
             msg.debug("ContactsKamino: Skipping contact data allocations since total requested capacity was `0`.")
+            self._data = ContactsKaminoData(model_max_contacts_host=0, world_max_contacts_host=world_max_contacts)
             return
 
         # Allocate the contacts data on the specified device
@@ -911,17 +818,16 @@ class ContactsKamino:
 
     def clear(self):
         """
-        Clears the count of active contacts.
+        Clears the count of active contacts. Does nothing when no contacts are allocated.
         """
-        self._assert_has_data()
         if self._data.model_max_contacts_host > 0:
             self._data.clear()
 
     def reset(self):
         """
         Clears the count of active contacts and resets data to sentinel values.
+        Does nothing when no contacts are allocated.
         """
-        self._assert_has_data()
         if self._data.model_max_contacts_host > 0:
             self._data.reset()
 
@@ -931,7 +837,23 @@ class ContactsKamino:
 
     def _assert_has_data(self):
         if self._data.model_max_contacts_host == 0:
-            raise RuntimeError("ContactsKaminoData has not been allocated. Call `finalize()` before accessing data.")
+            raise RuntimeError(
+                "ContactsKamino has no allocated contact data, either because it was not finalized "
+                "or because its capacity is zero."
+            )
+
+
+def _as_contact_capacity(capacity: ContactCapacity | int | Sequence[int]) -> ContactCapacity:
+    """Converts a ``capacity`` argument of :class:`ContactsKamino` to a :class:`ContactCapacity`, as given."""
+    if isinstance(capacity, ContactCapacity):
+        return capacity
+    if isinstance(capacity, numbers.Integral):
+        return ContactCapacity(world_max_contacts=(capacity,))
+    if isinstance(capacity, Iterable):
+        return ContactCapacity(world_max_contacts=tuple(capacity))
+    raise TypeError(
+        f"`capacity` must be a ContactCapacity, an integer, or a sequence of integers, got {type(capacity).__name__}"
+    )
 
 
 ###

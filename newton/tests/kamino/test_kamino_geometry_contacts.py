@@ -17,6 +17,7 @@ import warp as wp
 import newton
 from newton._src.sim import Model, ModelBuilder, State
 from newton._src.sim.contacts import Contacts
+from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity
 from newton._src.solvers.kamino._src.geometry.contacts import (
     ContactMode,
     ContactsKamino,
@@ -612,68 +613,42 @@ class TestGeometryContacts(unittest.TestCase):
         run_case(old_count=4, current_count=2)
         run_case(old_count=2, current_count=4)
 
-    def test_single_default_allocation(self):
-        contacts = ContactsKamino(capacity=0, device=self.default_device, remappable=True)
-        self.assertEqual(contacts.model_max_contacts_host, contacts.default_max_world_contacts)
-        self.assertEqual(contacts.world_max_contacts_host[0], contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.model_max_contacts), 1)
-        self.assertEqual(len(contacts.model_active_contacts), 1)
-        self.assertEqual(len(contacts.world_max_contacts), 1)
-        self.assertEqual(len(contacts.world_active_contacts), 1)
-        self.assertEqual(contacts.model_max_contacts.numpy()[0], contacts.default_max_world_contacts)
-        self.assertEqual(contacts.model_active_contacts.numpy()[0], 0)
-        self.assertEqual(contacts.world_max_contacts.numpy()[0], contacts.default_max_world_contacts)
-        self.assertEqual(contacts.world_active_contacts.numpy()[0], 0)
-        self.assertEqual(len(contacts.wid), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.cid), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.gid_AB), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.bid_AB), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.position_A), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.position_B), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.gapfunc), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.frame), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.material), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.margins), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.key), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.reaction), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.velocity), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.mode), contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.remap), contacts.default_max_world_contacts)
+    def test_zero_capacity_is_empty(self):
+        """Allocate no contact data for a zero capacity while keeping its host sizes queryable."""
+        for capacity, num_worlds in ((0, 1), ([0, 0, 0], 3), (ContactCapacity.uniform(0, 3), 3)):
+            with self.subTest(capacity=capacity):
+                contacts = ContactsKamino(capacity=capacity, device=self.default_device, remappable=True)
+                self.assertEqual(contacts.model_max_contacts_host, 0)
+                self.assertEqual(contacts.world_max_contacts_host, [0] * num_worlds)
+                self.assertIsNone(contacts.data.wid)
+                contacts.clear()
+                contacts.reset()
+                with self.assertRaises(RuntimeError):
+                    _ = contacts.wid
 
-    def test_multiple_default_allocations(self):
-        num_worlds = 10
-        capacities = [0] * num_worlds
-        contacts = ContactsKamino(capacity=capacities, device=self.default_device, remappable=True)
+    def test_mixed_zero_capacities_are_literal(self):
+        """Keep zero per-world capacities as given instead of replacing them with a default."""
+        contacts = ContactsKamino(capacity=[0, 5, 0], device=self.default_device)
+        self.assertEqual(contacts.world_max_contacts_host, [0, 5, 0])
+        self.assertEqual(contacts.model_max_contacts_host, 5)
+        np.testing.assert_array_equal(contacts.world_max_contacts.numpy(), [0, 5, 0])
+        self.assertEqual(len(contacts.wid), 5)
 
-        model_max_contacts = contacts.model_max_contacts.numpy()
-        model_active_contacts = contacts.model_active_contacts.numpy()
-        self.assertEqual(len(contacts.model_max_contacts), 1)
-        self.assertEqual(len(contacts.model_active_contacts), 1)
-        self.assertEqual(model_max_contacts[0], num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(model_active_contacts[0], 0)
+    def test_capacity_list_is_not_mutated(self):
+        """Leave the caller's capacity list untouched and unaliased."""
+        capacities = [0, 4, 0]
+        contacts = ContactsKamino(capacity=capacities, device=self.default_device)
+        self.assertEqual(capacities, [0, 4, 0])
+        capacities[1] = 99
+        self.assertEqual(contacts.world_max_contacts_host, [0, 4, 0])
 
-        world_max_contacts = contacts.world_max_contacts.numpy()
-        world_active_contacts = contacts.world_active_contacts.numpy()
-        self.assertEqual(len(contacts.world_max_contacts), num_worlds)
-        self.assertEqual(len(contacts.world_active_contacts), num_worlds)
-        for i in range(num_worlds):
-            self.assertEqual(world_max_contacts[i], contacts.default_max_world_contacts)
-            self.assertEqual(world_active_contacts[i], 0)
-        self.assertEqual(len(contacts.wid), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.cid), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.gid_AB), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.bid_AB), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.position_A), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.position_B), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.gapfunc), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.frame), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.material), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.margins), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.key), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.reaction), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.velocity), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.mode), num_worlds * contacts.default_max_world_contacts)
-        self.assertEqual(len(contacts.remap), num_worlds * contacts.default_max_world_contacts)
+    def test_accepts_contact_capacity(self):
+        """Allocate exactly the per-world capacities of a resolved ContactCapacity."""
+        capacity = ContactCapacity(world_max_contacts=(3, 0, 2))
+        contacts = ContactsKamino(capacity, device=self.default_device)
+        self.assertEqual(contacts.world_max_contacts_host, [3, 0, 2])
+        self.assertEqual(contacts.model_max_contacts_host, 5)
+        self.assertEqual(len(contacts.key), 5)
 
     def test_multiple_custom_allocations(self):
         capacities = [10, 20, 30, 40, 50, 60]

@@ -21,6 +21,7 @@ from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.core.shapes import GeoType
 from newton._src.solvers.kamino._src.core.state import StateKamino
 from newton._src.solvers.kamino._src.dynamics import DualProblem
+from newton._src.solvers.kamino._src.geometry.capacity import ContactCapacity
 from newton._src.solvers.kamino._src.geometry.contacts import ContactsKamino
 from newton._src.solvers.kamino._src.geometry.detector import CollisionDetector
 from newton._src.solvers.kamino._src.integrators import IntegratorEuler, IntegratorMoreauJean
@@ -918,7 +919,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         """
         builder = build_boxes_fourbar()
         model = ModelKamino.from_newton(builder.finalize(device=self.default_device))
-        contacts = ContactsKamino(model=model)
+        contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=model.device)
         solver = SolverKaminoImpl(model=model, contacts=contacts)
         self.assertIsInstance(solver, SolverKaminoImpl)
         assert_solver_components(self, solver)
@@ -940,7 +941,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         """
         builder = build_boxes_fourbar(limits=False)
         model = ModelKamino.from_newton(builder.finalize(device=self.default_device))
-        contacts = ContactsKamino(model=model)
+        contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=model.device)
         solver = SolverKaminoImpl(model=model, contacts=contacts)
         self.assertIsInstance(solver, SolverKaminoImpl)
         assert_solver_components(self, solver)
@@ -1491,7 +1492,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         model = ModelKamino.from_newton(builder.finalize(device=self.default_device))
 
         # Initialize the solver and step it a few times
-        contacts = ContactsKamino(model=model)
+        contacts = ContactsKamino(ContactCapacity.resolve_from(model), device=model.device)
         config = SolverKamino.Config()
         config.padmm.warmstart_mode = "containers"
         solver = SolverKaminoImpl(model=model, contacts=contacts, config=config)
@@ -1775,7 +1776,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         msg.info(f"[single]: [init]: single_state_p.lambda_f_j:\n{single_state_p.lambda_f_j}\n\n")
         msg.info(f"[single]: [init]: single_state_p.lambda_tau_j:\n{single_state_p.lambda_tau_j}\n\n")
         # Create a contacts container for the single-instance system
-        single_contacts = ContactsKamino(model=single_model)
+        single_contacts = ContactsKamino(ContactCapacity.resolve_from(single_model), device=single_model.device)
 
         # Create simulator and check if the initial state is consistent with the contents of the builder
         single_solver = SolverKaminoImpl(model=single_model, contacts=single_contacts)
@@ -1873,7 +1874,7 @@ class TestSolverKaminoImpl(unittest.TestCase):
         multi_control = multi_model.control()
 
         # Create a contacts container for the multi-instance system
-        multi_contacts = ContactsKamino(model=multi_model)
+        multi_contacts = ContactsKamino(ContactCapacity.resolve_from(multi_model), device=multi_model.device)
 
         # Create simulator and check if the initial state is consistent with the contents of the builder
         multi_solver = SolverKaminoImpl(model=multi_model, contacts=multi_contacts)
