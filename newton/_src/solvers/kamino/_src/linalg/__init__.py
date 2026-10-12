@@ -9,6 +9,7 @@ from .core import (
     DenseRectangularMultiLinearInfo,
     DenseSquareMultiLinearInfo,
 )
+from .eigen import PowerIteration
 
 # Import the RCM-reordered semi-sparse blocked LLT solver here (rather than
 # from .linear) to avoid a circular import: .factorize.llt_blocked_rcm_solver
@@ -66,5 +67,6 @@ __all__ = [
     "LinearSolverNameToType",
     "LinearSolverType",
     "LinearSolverTypeToName",
+    "PowerIteration",
     "utils",
 ]

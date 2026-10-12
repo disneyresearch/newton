@@ -70,6 +70,7 @@ from .augmented_mass import (
     AugmentedMassOperator,
     AugmentedMassPreconditioner,
     BlockSparseMatrixFreeAugmentedMassOperator,
+    _scale_constraint_vector,
 )
 from .config import ProblemFormulation
 from .operators import (
@@ -77,6 +78,7 @@ from .operators import (
     compute_compliant_delassus_diagonal,
     jacobian_gemv,
     jacobian_transpose_gemv,
+    mass_gemv,
 )
 from .problem import ConstrainedDynamicsProblem, ConstrainedDynamicsProblemData, SystemJacobiansType
 
@@ -413,6 +415,39 @@ class PrimalProblem(ConstrainedDynamicsProblem):
             dim=cts_dim,
             inputs=[self._data.dim, self._data.vio, self._data.P, self._data.W, v, self._c_tmp, x],
             device=self.device,
+        )
+
+    def augmented_mass_gemv(
+        self,
+        x: wp.array[wp.float32],
+        y: wp.array[wp.float32],
+        world_mask: wp.array[wp.bool] | None = None,
+        alpha: float = 1.0,
+        beta: float = 0.0,
+    ):
+        """
+        Computes the generalized matrix-vector product ``y = alpha * (M + J^T W J) @ x + beta * y``
+        with the constraint-augmented generalized mass matrix of the current effective stiffness ``W``.
+
+        Args:
+            x: The input array of generalized vectors. Shape of ``(sum_of_num_body_dofs,)``.
+            y: The input-output array of generalized vectors. Shape of ``(sum_of_num_body_dofs,)``.
+            world_mask: The optional mask selecting the worlds to operate on. Defaults to all worlds.
+            alpha: The scaling of the matrix-vector product.
+            beta: The scaling of the input values of `y`.
+        """
+        mask = self._all_worlds_mask if world_mask is None else world_mask
+        model, data, jacobians = self._model, self._system_data, self._jacobians
+        jacobian_gemv(model, jacobians, self._data.dim, self._data.vio, x, self._c_phys, mask)
+        wp.launch(
+            _scale_constraint_vector,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[self._data.dim, self._data.vio, mask, self._data.W, self._c_phys],
+            device=self.device,
+        )
+        mass_gemv(model, data, x, y, mask, alpha=alpha, beta=beta)
+        jacobian_transpose_gemv(
+            model, jacobians, self._data.dim, self._data.vio, self._c_phys, y, mask, alpha=alpha, beta=1.0
         )
 
     def _resolve_augmented_mass_preconditioner(self) -> AugmentedMassPreconditioner:
