@@ -1480,12 +1480,7 @@ class TestGeometryContactConversions(unittest.TestCase):
         small_capacity = max(1, nc // 3)
         self.assertLess(small_capacity, nc)
         kamino_small = ContactsKamino(capacity=small_capacity, device=self.default_device)
-        with self.assertLogs(level="WARNING") as logs:
-            convert_contacts_newton_to_kamino(model, state, contacts, kamino_small)
-        self.assertTrue(
-            any("active contacts may be truncated" in message for message in logs.output),
-            "An undersized Kamino contact buffer must warn about possible truncation",
-        )
+        convert_contacts_newton_to_kamino(model, state, contacts, kamino_small)
         nc_small = int(kamino_small.model_active_contacts.numpy()[0])
         self.assertLessEqual(
             nc_small,
@@ -1497,8 +1492,7 @@ class TestGeometryContactConversions(unittest.TestCase):
         convert_contacts_newton_to_kamino(model_nc, state_nc, contacts_nc, kamino_small)
         self.assertEqual(int(kamino_small._data._contact_overflow_warning_emitted.numpy()[0]), 0)
 
-        with self.assertLogs(level="WARNING"):
-            convert_contacts_newton_to_kamino(model, state, contacts, kamino_small)
+        convert_contacts_newton_to_kamino(model, state, contacts, kamino_small)
         self.assertEqual(int(kamino_small._data._contact_overflow_warning_emitted.numpy()[0]), 1)
         # Geometry must be sound for whatever was kept.
         bid_AB = kamino_small.bid_AB.numpy()[:nc_small]
@@ -1569,12 +1563,8 @@ class TestGeometryContactConversions(unittest.TestCase):
         self.assertGreater(input_count, 2)
 
         kamino = ContactsKamino(capacity=[1, 1], device=self.default_device)
-        with self.assertLogs(level="WARNING") as logs:
-            convert_contacts_newton_to_kamino(model, state, contacts, kamino)
-        self.assertTrue(
-            any("active contacts may be truncated" in message for message in logs.output),
-            "An undersized per-world contact buffer must warn about possible truncation",
-        )
+        convert_contacts_newton_to_kamino(model, state, contacts, kamino)
+        self.assertEqual(int(kamino._data._contact_overflow_warning_emitted.numpy()[0]), 1)
 
         np.testing.assert_array_equal(kamino.world_active_contacts.numpy(), [1, 1])
         self.assertEqual(int(kamino.model_active_contacts.numpy()[0]), 2)

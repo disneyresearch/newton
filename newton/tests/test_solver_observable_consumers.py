@@ -82,9 +82,10 @@ class TestSolverObservableConsumers(unittest.TestCase):
         builder.add_ground_plane()
         builder.end_world()
         model = builder.finalize(device="cpu")
-        newton.CollisionPipeline(model, rigid_contact_max=0, soft_contact_max=0)
         config = newton.solvers.SolverKamino.Config(use_collision_detector=True)
         solver = newton.solvers.SolverKamino(model, config=config)
+        # A pipeline that already exists when the solver is created caps the native capacity instead.
+        newton.CollisionPipeline(model, rigid_contact_max=0, soft_contact_max=0)
         solver.step(model.state(), model.state(), model.control(), None, 0.001)
         with self.assertRaisesRegex(ValueError, "exceeds CollisionPipeline capacity"):
             solver.observables({SolverObservableFlags.CONTACT_F})
