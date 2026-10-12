@@ -39,6 +39,7 @@ from .math import (
     compute_preconditioned_iterate_residual,
     compute_vector_sum,
     project_to_coulomb_cone,
+    project_to_coulomb_dual_cone,
 )
 from .types import PADMMConfigStruct, PADMMPenalty, PADMMPenaltyUpdate, PADMMStatus
 
@@ -195,6 +196,82 @@ def _scale_warmstart_forces(
     scale = solver_config[wid].warmstart_scale
     solver_x[index] *= scale
     solver_y[index] *= scale
+
+
+@wp.kernel
+def _project_warmstart_velocity(
+    # Inputs:
+    world_mask: wp.array[wp.bool],
+    problem_dim: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_nbc: wp.array[wp.int32],
+    problem_nl: wp.array[wp.int32],
+    problem_nc: wp.array[wp.int32],
+    problem_bcio: wp.array[wp.int32],
+    problem_cio: wp.array[wp.int32],
+    problem_bcgo: wp.array[wp.int32],
+    problem_lcgo: wp.array[wp.int32],
+    problem_ccgo: wp.array[wp.int32],
+    problem_mu: wp.array[wp.float32],
+    problem_bound_lower: wp.array[wp.float32],
+    problem_bound_upper: wp.array[wp.float32],
+    solver_y: wp.array[wp.float32],
+    sigma: wp.array[wp.float32],
+    # Outputs:
+    solver_z: wp.array[wp.float32],
+):
+    """
+    Projects the De Saxce-corrected constraint velocity `sigma` consistent with the warm-started reactions
+    `y` to the dual cone of the constraints, i.e. `z = Proj_{K*}(sigma)`, where bilateral rows vanish, limit
+    rows are non-negative, contact rows lie in the dual friction cone, and bounded-multiplier rows lie in
+    the normal cone of their box at `y`.
+    """
+    # Retrieve the world and constraint indices as the thread indices
+    wid, tid = wp.tid()
+
+    # Skip if the world is not selected or the row index exceeds the problem size
+    if not world_mask[wid] or tid >= problem_dim[wid]:
+        return
+
+    # Retrieve the row offsets of the constraint groups of the world
+    vio = problem_vio[wid]
+    v_i = vio + tid
+    bcgo = problem_bcgo[wid]
+    nbc = problem_nbc[wid]
+    lcgo = problem_lcgo[wid]
+    nl = problem_nl[wid]
+    ccgo = problem_ccgo[wid]
+    nc = problem_nc[wid]
+
+    # Bounded-multiplier rows: normal cone of the box at the warm-started reaction
+    if tid >= bcgo and tid < bcgo + nbc:
+        b_i = problem_bcio[wid] + tid - bcgo
+        y_i = solver_y[v_i]
+        z_i = wp.float32(0.0)
+        if y_i <= problem_bound_lower[b_i]:
+            z_i = wp.max(sigma[v_i], 0.0)
+        elif y_i >= problem_bound_upper[b_i]:
+            z_i = wp.min(sigma[v_i], 0.0)
+        solver_z[v_i] = z_i
+
+    # Limit rows: non-negative orthant
+    elif tid >= lcgo and tid < lcgo + nl:
+        solver_z[v_i] = wp.max(sigma[v_i], 0.0)
+
+    # Contact rows: dual friction cone, projected by the thread of the first row of each contact
+    elif tid >= ccgo and tid < ccgo + 3 * nc:
+        if (tid - ccgo) % 3 == 0:
+            cid = (tid - ccgo) // 3
+            z_c = project_to_coulomb_dual_cone(
+                wp.vec3f(sigma[v_i], sigma[v_i + 1], sigma[v_i + 2]), problem_mu[problem_cio[wid] + cid]
+            )
+            solver_z[v_i] = z_c[0]
+            solver_z[v_i + 1] = z_c[1]
+            solver_z[v_i + 2] = z_c[2]
+
+    # Bilateral rows: the dual cone of an unbounded reaction is the origin
+    else:
+        solver_z[v_i] = 0.0
 
 
 def make_initialize_solver_kernel(use_acceleration: bool = False):

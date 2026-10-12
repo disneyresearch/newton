@@ -1300,6 +1300,118 @@ class TestPADMMSpectralPenalty(unittest.TestCase):
                     np.testing.assert_allclose(solver.data.solution.v_plus.numpy()[:n], v_plus_ref, atol=1e-4)
 
 
+def project_to_dual_cone_reference(x: np.ndarray, mu: float) -> np.ndarray:
+    """Projects a 3D vector (normal last) onto the dual of the Coulomb friction cone of coefficient `mu`."""
+    xt, xn = x[:2], x[2]
+    n = np.linalg.norm(xt)
+    if mu * n <= xn:
+        return x.copy()
+    if n <= -mu * xn:
+        return np.zeros(3)
+    a = (n + mu * xn) / (1.0 + mu * mu)
+    return np.array([a * xt[0] / n, a * xt[1] / n, mu * a])
+
+
+def consistent_warmstart_velocity_reference(problem: DualProblem, D_p: np.ndarray, y: np.ndarray, w: int) -> np.ndarray:
+    """Computes the reference warm-start velocity `z_0 = Proj_{K*}(sigma_0 + Gamma(sigma_0))` of a world."""
+    d = problem.data
+    vio, dim = int(d.vio.numpy()[w]), int(d.dim.numpy()[w])
+    sigma = D_p.astype(np.float64) @ y[vio : vio + dim] + d.v_f.numpy()[vio : vio + dim]
+    bcgo, nbc = int(d.bcgo.numpy()[w]), int(d.nbc.numpy()[w])
+    lcgo, nl = int(d.lcgo.numpy()[w]), int(d.nl.numpy()[w])
+    ccgo, nc = int(d.ccgo.numpy()[w]), int(d.nc.numpy()[w])
+    bcio, cio = int(d.bcio.numpy()[w]), int(d.cio.numpy()[w])
+    mu, lower, upper = d.mu.numpy(), d.bound_lower.numpy(), d.bound_upper.numpy()
+    z = np.zeros(dim)
+    for i in range(dim):
+        if bcgo <= i < bcgo + nbc:
+            b, y_i = bcio + i - bcgo, y[vio + i]
+            z[i] = max(sigma[i], 0.0) if y_i <= lower[b] else (min(sigma[i], 0.0) if y_i >= upper[b] else 0.0)
+        elif lcgo <= i < lcgo + nl:
+            z[i] = max(sigma[i], 0.0)
+    for c in range(nc):
+        k = ccgo + 3 * c
+        s = sigma[k : k + 3].copy()
+        s[2] += mu[cio + c] * np.linalg.norm(s[:2])
+        z[k : k + 3] = project_to_dual_cone_reference(s, mu[cio + c])
+    return z
+
+
+class TestPADMMConsistentWarmStart(unittest.TestCase):
+    def setUp(self):
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+        self.default_device = wp.get_device(test_context.device)
+
+    def tearDown(self):
+        self.default_device = None
+
+    def _warmstart(self, test: TestSetup, warmstart_velocity: str, use_acceleration: bool) -> PADMMSolver:
+        config = PADMMSolver.Config(warmstart_velocity=warmstart_velocity, max_iterations=500)
+        solver = PADMMSolver(
+            model=test.model,
+            config=config,
+            warmstart=PADMMWarmStartMode.INTERNAL,
+            use_acceleration=use_acceleration,
+            use_graph_conditionals=False,
+        )
+        test.build()
+        solver.coldstart()
+        solver.solve(problem=test.problem)
+        test.build()
+        solver.warmstart(test.problem, test.model, test.data, test.limits, test.contacts)
+        return solver
+
+    def test_01_consistent_velocity_matches_reference(self):
+        for builder_fn in (basics.build_box_on_plane, basics.build_boxes_fourbar):
+            for sparse in (False, True):
+                for use_acceleration in (False, True):
+                    with self.subTest(builder=builder_fn.__name__, sparse=sparse, use_acceleration=use_acceleration):
+                        test = TestSetup(
+                            builder_fn=builder_fn, max_world_contacts=8, device=self.default_device, sparse=sparse
+                        )
+                        solver = self._warmstart(test, "consistent", use_acceleration)
+                        state = solver.data.state
+                        y = (state.y_hat if use_acceleration else state.y_p).numpy()
+                        z = (state.z_hat if use_acceleration else state.z_p).numpy()
+                        # NOTE: The regularization of the previous solve is removed from the reference operator
+                        test.problem.data.eta.zero_()
+                        test.problem.update_regularization()
+                        D_np = [D.copy() for D in extract_delassus(test.problem.delassus, only_active_dims=True)]
+                        d = test.problem.data
+                        for w in range(test.model.size.num_worlds):
+                            vio, dim = int(d.vio.numpy()[w]), int(d.dim.numpy()[w])
+                            z_ref = consistent_warmstart_velocity_reference(test.problem, D_np[w], y, w)
+                            scale = max(1.0, float(np.max(np.abs(z_ref))))
+                            np.testing.assert_allclose(z[vio : vio + dim], z_ref, atol=1e-4 * scale)
+
+                            # The augmented contact velocities lie in the dual friction cones
+                            mu = d.mu.numpy()[d.cio.numpy()[w] : d.cio.numpy()[w] + d.nc.numpy()[w]]
+                            for c, mu_c in enumerate(mu):
+                                k = vio + int(d.ccgo.numpy()[w]) + 3 * c
+                                self.assertLessEqual(mu_c * np.linalg.norm(z[k : k + 2]), z[k + 2] + 1e-5 * scale)
+
+    def test_02_consistent_velocity_converges(self):
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                iterations = {}
+                for warmstart_velocity in ("cached", "consistent"):
+                    test = TestSetup(
+                        builder_fn=basics.build_box_on_plane,
+                        max_world_contacts=8,
+                        device=self.default_device,
+                        sparse=sparse,
+                    )
+                    solver = self._warmstart(test, warmstart_velocity, use_acceleration=True)
+                    solver.solve(problem=test.problem)
+                    status = solver.data.status.numpy()[0]
+                    self.assertTrue(bool(status["converged"]))
+                    iterations[warmstart_velocity] = int(status["iterations"])
+                # NOTE: Re-solving the same problem, the cached velocities are already consistent with the
+                # reactions, so the consistent warm-start must neither help nor hurt significantly
+                self.assertLessEqual(iterations["consistent"], int(1.2 * iterations["cached"]) + 2)
+
+
 ###
 # Test execution
 ###

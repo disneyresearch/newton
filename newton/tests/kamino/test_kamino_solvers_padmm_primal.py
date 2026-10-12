@@ -14,7 +14,7 @@ from newton._src.solvers.kamino._src.core.model import ModelKamino
 from newton._src.solvers.kamino._src.dynamics.dual import DualProblem
 from newton._src.solvers.kamino._src.dynamics.primal import PrimalProblem
 from newton._src.solvers.kamino._src.linalg import ConjugateResidualSolver, LLTBlockedSolver
-from newton._src.solvers.kamino._src.solvers.padmm import PADMMSolver
+from newton._src.solvers.kamino._src.solvers.padmm import PADMMSolver, PADMMWarmStartMode
 from newton._src.solvers.kamino._src.solvers.padmm_primal import PADMMPrimalSolver
 from newton._src.solvers.kamino.config import (
     ConstrainedDynamicsConfig,
@@ -297,7 +297,37 @@ class TestPADMMPrimalSolver(unittest.TestCase):
                             else:
                                 np.testing.assert_allclose(m, lambda_min + eta, rtol=1e-2)
 
-    def test_06_solve_converges(self):
+    def test_06_consistent_warmstart_velocity_matches_dual_padmm(self):
+        """Checks that the velocity-consistent warm-start is identical for the dual and primal PADMM."""
+        for sparse in (False, True):
+            with self.subTest(sparse=sparse):
+                test = TestSetup(basics.build_boxes_fourbar, self.default_device, sparse=sparse)
+                z_0 = {}
+                for name, solver_type, config_type, problem in (
+                    ("dual", PADMMSolver, PADMMSolverConfig, test.dual),
+                    ("primal", PADMMPrimalSolver, PADMMPrimalSolverConfig, test.primal),
+                ):
+                    solver = solver_type(
+                        model=test.model,
+                        config=config_type(warmstart_velocity="consistent", max_iterations=100),
+                        warmstart=PADMMWarmStartMode.INTERNAL,
+                        use_graph_conditionals=False,
+                    )
+                    solver.coldstart()
+                    solver.solve(problem=problem)
+                    problem.build(
+                        model=test.model,
+                        data=test.data,
+                        jacobians=test.jacobians,
+                        limits=test.limits,
+                        contacts=test.contacts,
+                    )
+                    solver.warmstart(problem, test.model, test.data, test.limits, test.contacts)
+                    z_0[name] = test.world_blocks(solver.data.state.z_hat.numpy())
+                for w in range(test.model.size.num_worlds):
+                    assert_close_normwise(z_0["primal"][w], z_0["dual"][w], tol=1e-3)
+
+    def test_07_solve_converges(self):
         for sparse in (False, True):
             with self.subTest(sparse=sparse):
                 test = TestSetup(basics.build_box_on_plane, self.default_device, sparse=sparse)

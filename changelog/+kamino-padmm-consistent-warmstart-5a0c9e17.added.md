@@ -1,0 +1,1 @@
+Add the option to warm-start the augmented constraint velocities of the PADMM backends of `SolverKamino` consistently with the warm-started constraint reactions via `SolverKamino.Config.padmm.warmstart_velocity`.

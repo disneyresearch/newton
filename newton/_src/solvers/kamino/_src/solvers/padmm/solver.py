@@ -42,6 +42,7 @@ from .kernels import (
     _make_compute_infnorm_residuals_kernel,
     _make_project_dual_convergence_accel_kernel,
     _project_to_feasible_cone,
+    _project_warmstart_velocity,
     _refine_spectral_lower_bound,
     _reset_penalty,
     _reset_solver_data,
@@ -167,6 +168,11 @@ class PADMMSolver:
         # Declare the solver data container
         self._data: PADMMData | None = None
         self._all_worlds_mask: wp.array[wp.bool] | None = None
+
+        # Declare the data of the velocity-consistent warm-start
+        self._use_consistent_warmstart_velocity: bool = False
+        self._consistent_warmstart_mask: wp.array[wp.bool] | None = None
+        self._warmstart_sigma: wp.array[wp.float32] | None = None
 
         # Declare the device cache
         self._device: wp.DeviceLike = None
@@ -339,6 +345,16 @@ class PADMMSolver:
         # Initialize the ALM penalty, which may be warm-started across solves
         self._reset_penalty(self._all_worlds_mask)
 
+        # Allocate the data of the velocity-consistent warm-start of the augmented constraint velocities
+        consistent = [c.warmstart_velocity == "consistent" for c in self._config]
+        self._use_consistent_warmstart_velocity = any(consistent)
+        self._consistent_warmstart_mask = None
+        self._warmstart_sigma = None
+        if self._use_consistent_warmstart_velocity:
+            with wp.ScopedDevice(self._device):
+                self._consistent_warmstart_mask = wp.array(consistent, dtype=wp.bool)
+                self._warmstart_sigma = wp.zeros(shape=(self._size.sum_of_max_total_cts,), dtype=wp.float32)
+
         # Specialize certain solver kernels depending on whether acceleration is enabled
         self._initialize_solver_kernel = make_initialize_solver_kernel(self._use_acceleration)
         self._collect_solver_info_kernel = make_collect_solver_info_kernel(self._use_acceleration)
@@ -452,6 +468,57 @@ class PADMMSolver:
                 raise ValueError(f"Invalid warmstart mode: {self._warmstart}")
 
         self._scale_warmstart_forces(problem)
+
+        # Optionally replace the warm-started augmented constraint velocities by those consistent with the reactions
+        if self._use_consistent_warmstart_velocity:
+            self._warmstart_consistent_velocity(problem)
+
+    def _warmstart_consistent_velocity(self, problem: ConstrainedDynamicsProblem):
+        """
+        Warm-starts the augmented constraint velocities with those consistent with the warm-started reactions,
+        i.e. `z_0 = Proj_{K*}(sigma_0 + Gamma(sigma_0))` with `sigma_0 = P (D + R) P y_0 + P v_f`, for the worlds
+        configured with the `consistent` warm-start velocity.
+
+        Args:
+            problem: The forward dynamics problem to be solved.
+        """
+        y_0 = self._data.state.y_hat if self._use_acceleration else self._data.state.y_p
+        z_0 = self._data.state.z_hat if self._use_acceleration else self._data.state.z_p
+        sigma = self._warmstart_sigma
+
+        # Compute the (preconditioned) constraint velocities consistent with the reactions: sigma = P (D + R) P y + P v_f
+        wp.copy(sigma, problem.data.v_f)
+        problem.gemv(
+            x=y_0, y=sigma, alpha=1.0, beta=1.0, preconditioned=True, world_mask=self._consistent_warmstart_mask
+        )
+
+        # Apply the De Saxce correction and project to the dual cone of the constraints
+        self._warmstart_desaxce_correction(problem, z=sigma)
+        data = problem.data
+        wp.launch(
+            kernel=_project_warmstart_velocity,
+            dim=(self._size.num_worlds, self._size.max_of_max_total_cts),
+            inputs=[
+                self._consistent_warmstart_mask,
+                data.dim,
+                data.vio,
+                data.nbc,
+                data.nl,
+                data.nc,
+                data.bcio,
+                data.cio,
+                data.bcgo,
+                data.lcgo,
+                data.ccgo,
+                data.mu,
+                data.bound_lower,
+                data.bound_upper,
+                y_0,
+                sigma,
+            ],
+            outputs=[z_0],
+            device=self.device,
+        )
 
     def _scale_warmstart_forces(self, problem: ConstrainedDynamicsProblem):
         """Scales the warm-started primal and slack force iterates."""

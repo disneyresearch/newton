@@ -786,6 +786,20 @@ class PADMMSolverConfig:
     minimum-norm solution.
     """
 
+    warmstart_velocity: Literal["cached", "consistent"] = "cached"
+    """
+    The warm-start of the augmented post-event constraint velocity `z` (the ADMM dual variable of
+    the dual PADMM, and the splitting variable `v_hat` of the primal PADMM), which only applies if
+    `warmstart_mode` is not `none`:\n
+    - `cached`: Use the constraint velocities cached with the warm-started constraint reactions.
+    - `consistent`: Use the constraint velocity consistent with the warm-started constraint
+      reactions `lambda_0` of the current step, i.e. `sigma_0 = (D + R) lambda_0 + v_f`, with
+      the De Saxce correction and projected to the dual cone of the constraints:
+      `z_0 = Proj_{K*}(sigma_0 + Gamma(sigma_0))`. Bounded-multiplier rows are projected to the
+      normal cone of their box at `lambda_0`. Requires one matrix-vector product per warm-start.\n
+    Defaults to `cached`.
+    """
+
     contact_warmstart_method: Literal[
         "key_and_position",
         "geom_pair_net_force",
@@ -984,6 +998,10 @@ class PADMMSolverConfig:
         if self.spectral_inverse_iterations <= 0:
             raise ValueError(
                 f"Invalid spectral inverse iterations: {self.spectral_inverse_iterations}. Must be a positive integer."
+            )
+        if self.warmstart_velocity not in ("cached", "consistent"):
+            raise ValueError(
+                f"Invalid warmstart velocity: {self.warmstart_velocity}. Must be one of ('cached', 'consistent')."
             )
 
         # Ensure that the enum-valued parameters are valid options
