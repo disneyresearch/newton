@@ -340,6 +340,12 @@ class RigidBodySim:
         )
         self.model: ModelKamino = self.sim.model
         msg.info(f"Model size: {self.sim.model.size}")
+        if self.sim.contacts is None:
+            raise ValueError(
+                "RigidBodySim requires contact capacity, but Kamino resolved zero contacts. "
+                "Add colliding shapes to the scene, raise Model.rigid_contact_max, or set "
+                "settings.collision_detector.max_contacts_per_world to a positive value."
+            )
         msg.info(f"Contacts capacity: {self.sim.contacts.model_max_contacts_host}")
 
         # Apply body pose offset to initial body poses (affects all resets).

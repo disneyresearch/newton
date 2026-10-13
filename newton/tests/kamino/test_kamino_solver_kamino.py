@@ -889,11 +889,8 @@ class TestConstraintFreeWorlds(unittest.TestCase):
                 )
                 model = builder.finalize(device=self.default_device)
 
-                config = SolverKamino.Config(
-                    use_collision_detector=True,
-                    collision_detector=kamino_config.CollisionDetectorConfig(max_contacts_per_world=0),
-                    **kwargs,
-                )
+                # The body has no shapes, so the natural capacity resolves to zero contacts
+                config = SolverKamino.Config(use_collision_detector=True, **kwargs)
                 solver = SolverKamino(model, config=config)
                 self.assertIsNone(solver._contacts_kamino)
 
