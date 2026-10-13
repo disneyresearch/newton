@@ -96,7 +96,7 @@ class TestContactCapacityValue(unittest.TestCase):
     def test_rejects_totals_beyond_int32(self):
         """Reject capacities whose total exceeds the int32 range of device counters."""
         self.assertEqual(ContactCapacity(world_max_contacts=(2**31 - 1,)).model_max_contacts, 2**31 - 1)
-        with self.assertRaises(ValueError):
+        with self.assertRaisesRegex(ValueError, "max_contacts_per_world or max_contacts"):
             ContactCapacity(world_max_contacts=(2**31 - 1, 1))
 
     def test_is_immutable(self):
@@ -214,6 +214,7 @@ class TestContactCapacityResolve(unittest.TestCase):
         self.assertEqual(capped.model_max_contacts, total // 2)
         self.assertTrue(all(c <= p for c, p in zip(capped.world_max_contacts, pair_bound, strict=True)))
         self.assertTrue(any("rigid_contact_max" in record.getMessage() for record in logs.records))
+        self.assertTrue(any("rigid_contact_max is None" in record.getMessage() for record in logs.records))
         self.assertTrue(all(record.levelno < logging.WARNING for record in logs.records))
 
     def test_float_max_contacts_caps_like_an_integer(self):

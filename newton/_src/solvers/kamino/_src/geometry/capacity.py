@@ -95,7 +95,10 @@ class ContactCapacity:
         if len(values) == 0:
             raise ValueError("ContactCapacity requires at least one world")
         if sum(values) > _INT32_MAX:
-            raise ValueError(f"ContactCapacity total of {sum(values)} contacts exceeds the int32 limit of {_INT32_MAX}")
+            raise ValueError(
+                f"ContactCapacity total of {sum(values)} contacts exceeds the int32 limit of {_INT32_MAX}; "
+                "reduce it with CollisionDetectorConfig.max_contacts_per_world or max_contacts"
+            )
         object.__setattr__(self, "world_max_contacts", tuple(values))
 
     ###
@@ -185,7 +188,8 @@ class ContactCapacity:
             if sum(world_max_contacts) < sum(budget):
                 msg.info(
                     "ContactCapacity: Model.rigid_contact_max (%d) caps the Kamino contact capacity at %d instead "
-                    "of %d. Create the Kamino solver before the CollisionPipeline to size Newton's buffer from Kamino.",
+                    "of %d. Kamino sizes Newton's buffer itself only if Model.rigid_contact_max is None when the "
+                    "solver is created.",
                     rigid_contact_max,
                     sum(world_max_contacts),
                     sum(budget),
