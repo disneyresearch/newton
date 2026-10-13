@@ -1,1 +1,1 @@
-Fix `SolverKamino` contact capacities depending on construction order: a `CollisionPipeline` or `Model.rigid_contact_max` that existed before the solver replaced Kamino's per-world capacities, and internal collision detection overwrote a user-set `rigid_contact_max`.
+Fix `SolverKamino` replacing its per-world contact capacities with a `Model.rigid_contact_max` that was set before construction, by the user or by a `CollisionPipeline`; that value now caps them instead. Internal collision detection also no longer overwrites a user-set `rigid_contact_max`.

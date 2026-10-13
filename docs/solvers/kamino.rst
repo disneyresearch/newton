@@ -145,6 +145,13 @@ When a step generates more contacts than a world can hold, Kamino keeps the
 contacts that fit, drops the rest, and prints a warning for that step. Raise
 ``max_contacts_per_world`` if this happens regularly.
 
+The 255-contact reservation per mesh or heightfield pair assumes the pipeline's
+contact reduction is on. With ``CollisionPipeline(reduce_contacts=False)`` a
+single pair can emit many more contacts, and the overflow warning fires every
+step. Raising ``Model.rigid_contact_max`` does not help in that case because it
+only caps Kamino's capacity; set ``config.collision_detector.max_contacts_per_world``
+instead.
+
 Inspecting terminal status
 --------------------------
 
