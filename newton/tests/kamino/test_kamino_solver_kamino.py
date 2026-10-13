@@ -3,6 +3,7 @@
 
 """Unit tests for the :class:`SolverKaminoImpl` class"""
 
+import dataclasses
 import time
 import unittest
 import warnings
@@ -844,6 +845,18 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
             solver = SolverKamino(model, config=config)
         self.assertEqual(caught.filename, __file__)
         self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1, 1, 1])
+
+    def test_max_contacts_per_pair_warning_points_at_caller(self):
+        """Attribute every max_contacts_per_pair warning to user code, including rebuilt configs."""
+        model = self._make_three_world_model()
+        with warnings.catch_warnings(record=True) as caught:
+            warnings.simplefilter("always", DeprecationWarning)
+            detector_config = kamino_config.CollisionDetectorConfig(max_contacts_per_pair=4)
+            dataclasses.replace(detector_config, max_contacts=10)
+            SolverKamino.Config.from_model(model, collision_detector=detector_config)
+        deprecations = [w for w in caught if "max_contacts_per_pair" in str(w.message)]
+        self.assertGreaterEqual(len(deprecations), 3)
+        self.assertEqual({w.filename for w in deprecations}, {__file__})
 
 
 class TestConstraintFreeWorlds(unittest.TestCase):

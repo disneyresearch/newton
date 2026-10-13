@@ -7,8 +7,11 @@ Defines configurations for :class:`SolverKamino`.
 
 from __future__ import annotations
 
+import dataclasses
+import inspect
 import math
 import numbers
+import os
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -17,6 +20,41 @@ import warp as wp
 
 from ...core.types import override
 from ...sim import Model, ModelBuilder
+
+# Resolve the Newton source directory once so _external_stacklevel can skip frames inside it.
+# Two pardirs climb from newton/_src/solvers/kamino to newton/_src/, matching the convention
+# used by import_usd.py and sim/builder.py so that `newton/tests/` and user code are not skipped.
+_NEWTON_SRC_DIR = os.path.normpath(os.path.join(os.path.dirname(__file__), os.pardir, os.pardir)) + os.sep
+_DATACLASSES_FILE = os.path.normpath(dataclasses.__file__)
+
+
+def _is_internal_code(code: Any) -> bool:
+    """Return ``True`` for frames inside Newton, inside dataclasses.py, or inside dataclass-generated __init__."""
+    try:
+        filename = os.path.normpath(code.co_filename)
+    except (TypeError, AttributeError):
+        return False
+    if filename.startswith(_NEWTON_SRC_DIR) or filename == _DATACLASSES_FILE:
+        return True
+    # Dataclass-generated methods have a <string> filename
+    return code.co_filename.startswith("<") and code.co_name == "__init__"
+
+
+def _external_stacklevel() -> int:
+    """Return a ``stacklevel`` that points past Newton and dataclass machinery frames."""
+    frame = inspect.currentframe()
+    if frame is None:
+        return 2
+    frame = frame.f_back
+    stacklevel = 1
+    try:
+        while frame is not None and _is_internal_code(frame.f_code):
+            frame = frame.f_back
+            stacklevel += 1
+        return stacklevel
+    finally:
+        del frame
+
 
 ###
 # Module interface
@@ -246,7 +284,7 @@ class CollisionDetectorConfig(ConfigBase):
                 "CollisionDetectorConfig(max_contacts_per_pair=...) is deprecated in Newton 1.8 and has no effect; "
                 "use max_contacts_per_world or max_contacts to size Kamino contact buffers.",
                 DeprecationWarning,
-                stacklevel=3,
+                stacklevel=_external_stacklevel(),
             )
 
 
