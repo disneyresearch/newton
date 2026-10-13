@@ -755,16 +755,14 @@ class SolverKamino(SolverBase, CouplingInterface):
         self._material_update_conflict = wp.empty(1, dtype=wp.int32, device=model.device)
 
         # Resolve the contact capacity once, with the same rule for internal and external contacts.
-        # A known Newton capacity caps it, and otherwise Kamino publishes its total so that a
-        # CollisionPipeline created later allocates a matching Newton contact buffer.
+        # A known Newton capacity caps it; otherwise Kamino publishes its total at the end of
+        # construction so that a CollisionPipeline created later allocates a matching buffer.
         collision_config = self._config.collision_detector or self._kamino.CollisionDetector.Config()
         contact_capacity = self._kamino.ContactCapacity.resolve_from(
             self._model_kamino,
             config=collision_config,
             rigid_contact_max=model.rigid_contact_max,
         )
-        if model.rigid_contact_max is None:
-            model.rigid_contact_max = contact_capacity.model_max_contacts
 
         # Create a collision detector if enabled in the config, otherwise
         # set to `None` to disable internal collision detection in Kamino.
@@ -803,6 +801,12 @@ class SolverKamino(SolverBase, CouplingInterface):
         # Initialize the internal Kamino control wrapper
         self._control_kamino = self._kamino.ControlKamino()
         self._control_kamino.finalize(self._model_kamino)
+
+        # Publish the resolved capacity only after construction succeeds, mirroring
+        # CollisionPipeline. A failed retry with a different config then starts
+        # from the user's original Model.rigid_contact_max rather than Kamino's.
+        if model.rigid_contact_max is None:
+            model.rigid_contact_max = contact_capacity.model_max_contacts
 
     @property
     def status(self) -> wp.array[Any]:

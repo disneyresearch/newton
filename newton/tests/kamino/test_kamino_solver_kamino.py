@@ -779,6 +779,20 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [8])
         self.assertEqual(model.rigid_contact_max, 8)
 
+    def test_failed_construction_leaves_rigid_contact_max_unset(self):
+        """Leave Model.rigid_contact_max unset when solver construction fails after sizing contacts."""
+        for use_collision_detector in (True, False):
+            with self.subTest(use_collision_detector=use_collision_detector):
+                model = self._make_three_world_model()
+                self.assertIsNone(model.rigid_contact_max)
+                with mock.patch(
+                    "newton._src.solvers.kamino._src.SolverKaminoImpl",
+                    side_effect=RuntimeError("construction failed"),
+                ):
+                    with self.assertRaisesRegex(RuntimeError, "construction failed"):
+                        SolverKamino(model, config=SolverKamino.Config(use_collision_detector=use_collision_detector))
+                self.assertIsNone(model.rigid_contact_max)
+
     def test_external_zero_capacity_steps(self):
         """Verify external contacts with zero Kamino capacity allocate nothing and still step."""
         model = self._make_three_world_model()
