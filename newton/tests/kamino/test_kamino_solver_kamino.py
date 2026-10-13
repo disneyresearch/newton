@@ -858,6 +858,45 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         self.assertGreaterEqual(len(deprecations), 3)
         self.assertEqual({w.filename for w in deprecations}, {__file__})
 
+    def test_step_is_graph_capturable_for_each_capacity_path(self):
+        """Replay captured steps for internal, external, and zero-capacity external contacts."""
+        if not self.default_device.is_cuda:
+            self.skipTest("CUDA graph capture requires a CUDA device")
+        cases = {"internal": (True, None), "external": (False, None), "external_zero": (False, 0)}
+
+        def run(use_collision_detector: bool, per_world: int | None, captured: bool) -> np.ndarray:
+            model = self._make_three_world_model()
+            detector = kamino_config.CollisionDetectorConfig(max_contacts_per_world=per_world)
+            config = SolverKamino.Config(use_collision_detector=use_collision_detector, collision_detector=detector)
+            solver = SolverKamino(model, config=config)
+            pipeline = None if use_collision_detector else newton.CollisionPipeline(model)
+            contacts = pipeline.contacts() if pipeline is not None else None
+            state_0, state_1 = model.state(), model.state()
+
+            def two_steps():
+                for state_in, state_out in ((state_0, state_1), (state_1, state_0)):
+                    if pipeline is not None:
+                        pipeline.collide(state_in, contacts)
+                    solver.step(state_in, state_out, None, contacts, SIM_DT)
+
+            two_steps()  # Load all modules before any capture
+            if captured:
+                with wp.ScopedCapture(device=self.default_device) as capture:
+                    two_steps()
+                for _ in range(4):
+                    wp.capture_launch(capture.graph)
+            else:
+                for _ in range(4):
+                    two_steps()
+            return state_0.body_q.numpy()
+
+        for name, (use_collision_detector, per_world) in cases.items():
+            with self.subTest(path=name):
+                eager = run(use_collision_detector, per_world, captured=False)
+                replayed = run(use_collision_detector, per_world, captured=True)
+                self.assertTrue(np.all(np.isfinite(replayed)))
+                np.testing.assert_allclose(replayed, eager, atol=1e-5)
+
 
 class TestConstraintFreeWorlds(unittest.TestCase):
     """Verify that worlds without joint, limit, or contact rows construct and step."""
