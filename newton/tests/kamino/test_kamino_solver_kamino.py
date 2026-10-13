@@ -750,8 +750,10 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         model = self._make_three_world_model()
         pipeline = newton.CollisionPipeline(model, rigid_contact_max=2)
 
-        solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=True))
-        self.assertEqual(solver._contacts_kamino.model_max_contacts_host, 2)
+        with self.assertLogs(level="WARNING") as logs:
+            solver = SolverKamino(model, config=SolverKamino.Config(use_collision_detector=True))
+        self.assertTrue(any("zero contact capacity" in line for line in logs.output))
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [1, 1, 0])
         self.assertEqual(model.rigid_contact_max, 2)
 
         observables = solver.observables({newton.solvers.SolverObservableFlags.CONTACT_F})
@@ -759,6 +761,18 @@ class TestCollisionCapacityInitialization(unittest.TestCase):
         state_out = model.state()
         solver.step(state_in, state_out, None, pipeline.contacts(), SIM_DT, observables=observables)
         self.assertTrue(np.all(np.isfinite(observables.contact_f.numpy())))
+
+    def test_explicit_pipeline_capacity_caps_without_warning(self):
+        """Cap Kamino at an explicit pipeline capacity chosen before the solver without logging a warning."""
+        model = self._make_box_worlds_model([2])
+        model.rigid_contact_max = 8
+        newton.CollisionPipeline(model, rigid_contact_max=8)
+
+        config = SolverKamino.Config(dynamics_solver="dvi", sparse_dynamics=True, sparse_jacobian=True)
+        with self.assertNoLogs(level="WARNING"):
+            solver = SolverKamino(model, config=config)
+        self.assertEqual(solver._contacts_kamino.world_max_contacts_host, [8])
+        self.assertEqual(model.rigid_contact_max, 8)
 
     def test_external_zero_capacity_steps(self):
         """Verify external contacts with zero Kamino capacity allocate nothing and still step."""

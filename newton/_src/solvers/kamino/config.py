@@ -8,6 +8,7 @@ Defines configurations for :class:`SolverKamino`.
 from __future__ import annotations
 
 import math
+import numbers
 import warnings
 from dataclasses import dataclass, field
 from typing import Any, Literal
@@ -123,9 +124,8 @@ class CollisionDetectorConfig(ConfigBase):
     Applies to both internal collision detection and contacts converted from a
     Newton ``CollisionPipeline``.\n
     Defaults to ``None``, which sizes each world from its geometry: the sum of
-    its per-shape-pair contact limits, capped at the larger of 1000 and a
-    neighbor-count estimate for that world that uses the ``CollisionPipeline``
-    contact weights.
+    its per-shape-pair contact limits, capped at the larger of 1000 and the
+    ``CollisionPipeline`` capacity estimate evaluated for that world.
     """
 
     max_contacts_per_pair: int | None = None
@@ -209,6 +209,17 @@ class CollisionDetectorConfig(ConfigBase):
         bvtypes_supported = [e.name.lower() for e in BoundingVolumeType]
         if self.bvtype not in bvtypes_supported:
             raise ValueError(f"Invalid CD bounding-volume type: {self.bvtype}. Valid options are: {bvtypes_supported}")
+
+        # Accept integral floats such as `1e5` for the contact capacities, but store them as integers
+        for name in ("max_contacts", "max_contacts_per_world"):
+            value = getattr(self, name)
+            if value is None:
+                continue
+            if isinstance(value, bool) or not (
+                isinstance(value, numbers.Integral) or (isinstance(value, numbers.Real) and float(value).is_integer())
+            ):
+                raise TypeError(f"Invalid {name}: {value!r}. Must be an integer.")
+            setattr(self, name, int(value))
 
         # Ensure that max_contacts, if specified, is non-negative
         if self.max_contacts is not None and self.max_contacts < 0:

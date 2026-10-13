@@ -12,10 +12,11 @@ dynamics solver as well as external Newton contacts:
 
 1. ``CollisionDetectorConfig.max_contacts_per_world``, when set, gives every
    world the same capacity.
-2. Otherwise each world receives ``min(T_w, max(1000, H_w))``, where ``T_w`` is
+2. Otherwise each world receives ``min(T_w, max(1000, E_w))``, where ``T_w`` is
    the pair bound of the world (see
    :attr:`~newton._src.solvers.kamino._src.core.geometry.GeometriesModel.world_minimum_contacts`)
-   and ``H_w`` is Newton's neighbor-budget heuristic evaluated for that world.
+   and ``E_w`` is the ``CollisionPipeline`` estimate evaluated for that world,
+   i.e. the smaller of its neighbor-budget heuristic and its contact-pair term.
    ``CollisionDetectorConfig.max_contacts`` then scales the total down.
 3. A known Newton ``rigid_contact_max`` scales the total down, but never up.
 """
@@ -153,19 +154,25 @@ class ContactCapacity:
         """
         if config is None:
             config = CollisionDetectorConfig()
+        config.validate()
         if rigid_contact_max is not None and rigid_contact_max < 0:
             raise ValueError(f"`rigid_contact_max` must be non-negative, got {rigid_contact_max}")
 
         # Per-world budget, before any model-wide cap
         pair_bounds = _world_pair_bounds(model)
         if config.max_contacts_per_world is not None:
-            uncapped = [int(config.max_contacts_per_world)] * len(pair_bounds)
+            uncapped = [config.max_contacts_per_world] * len(pair_bounds)
             budget = uncapped
         else:
-            neighbor_bounds = _world_neighbor_bounds(model)
+            pipeline_estimates = [
+                min(neighbor, pair_count)
+                for neighbor, pair_count in zip(
+                    _world_neighbor_bounds(model), _world_pair_count_bounds(model), strict=True
+                )
+            ]
             uncapped = [
-                min(pair, max(_RIGID_CONTACT_MIN_CAPACITY, neighbor))
-                for pair, neighbor in zip(pair_bounds, neighbor_bounds, strict=True)
+                min(pair, max(_RIGID_CONTACT_MIN_CAPACITY, estimate))
+                for pair, estimate in zip(pair_bounds, pipeline_estimates, strict=True)
             ]
             budget = uncapped
             if config.max_contacts is not None:
@@ -176,13 +183,12 @@ class ContactCapacity:
         if rigid_contact_max is not None:
             world_max_contacts = _scale_down_to_total(budget, rigid_contact_max)
             if sum(world_max_contacts) < sum(budget):
-                msg.warning(
-                    "ContactCapacity: Model.rigid_contact_max (%d) reduces the Kamino contact capacity from %d to %d. "
-                    "Create the Kamino solver before the CollisionPipeline, or raise rigid_contact_max, "
-                    "to keep the full capacity.",
+                msg.info(
+                    "ContactCapacity: Model.rigid_contact_max (%d) caps the Kamino contact capacity at %d instead "
+                    "of %d. Create the Kamino solver before the CollisionPipeline to size Newton's buffer from Kamino.",
                     rigid_contact_max,
-                    sum(budget),
                     sum(world_max_contacts),
+                    sum(budget),
                 )
 
         starved = [
@@ -193,7 +199,7 @@ class ContactCapacity:
         if len(starved) > 0:
             msg.warning(
                 "ContactCapacity: %d world(s) with contact pairs have zero contact capacity after capping, "
-                "starting with world(s) %s.",
+                "starting with world(s) %s. Raise Model.rigid_contact_max or max_contacts.",
                 len(starved),
                 starved[:8],
             )
@@ -226,20 +232,16 @@ def _world_pair_bounds(model: ModelKamino) -> list[int]:
     return pair_bounds
 
 
-def _world_neighbor_bounds(model: ModelKamino) -> list[int]:
+def _world_shape_counts(model: ModelKamino) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """
-    Evaluates Newton's neighbor-budget contact heuristic for each world.
+    Counts the colliding primitive, mesh-or-heightfield, and plane shapes of each world.
 
-    Each colliding non-plane shape is assumed to touch at most
-    ``_RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE`` other shapes, at
-    ``_RIGID_CONTACTS_PER_PRIMITIVE_PAIR`` contacts per primitive pair and
-    ``_RIGID_CONTACTS_PER_MESH_PAIR`` contacts per mesh or heightfield pair,
-    halved because each pair is counted from both sides. Each plane is then
-    assumed to touch every non-plane shape. Global shapes count in every world.
+    Global shapes count in every world.
     """
     num_worlds = model.size.num_worlds
     if model.geoms.num_geoms == 0:
-        return [0] * num_worlds
+        zeros = np.zeros(num_worlds, dtype=np.int64)
+        return zeros, zeros, zeros
 
     geom_world = model.geoms.wid.numpy()
     geom_flags = model.geoms.flags.numpy()
@@ -257,15 +259,56 @@ def _world_neighbor_bounds(model: ModelKamino) -> list[int]:
         num_global = np.count_nonzero(mask & (geom_world < 0))
         return np.bincount(local, minlength=num_worlds)[:num_worlds].astype(np.int64) + num_global
 
-    num_primitives = count_per_world(primitive)
-    num_meshes = count_per_world(mesh)
-    num_planes = count_per_world(plane)
+    return count_per_world(primitive), count_per_world(mesh), count_per_world(plane)
+
+
+def _world_neighbor_bounds(model: ModelKamino) -> list[int]:
+    """
+    Evaluates Newton's neighbor-budget contact heuristic for each world.
+
+    Each colliding non-plane shape is assumed to touch at most
+    ``_RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE`` other shapes, at
+    ``_RIGID_CONTACTS_PER_PRIMITIVE_PAIR`` contacts per primitive pair and
+    ``_RIGID_CONTACTS_PER_MESH_PAIR`` contacts per mesh or heightfield pair,
+    halved because each pair is counted from both sides. Each plane is then
+    assumed to touch every non-plane shape. Global shapes count in every world.
+    """
+    num_primitives, num_meshes, num_planes = _world_shape_counts(model)
     contacts_per_neighbor = (
         num_primitives * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR + num_meshes * _RIGID_CONTACTS_PER_MESH_PAIR
     )
     neighbor_bounds = contacts_per_neighbor * _RIGID_CONTACT_MAX_NEIGHBORS_PER_SHAPE // 2
     neighbor_bounds += num_planes * contacts_per_neighbor
     return [int(bound) for bound in neighbor_bounds]
+
+
+def _world_pair_count_bounds(model: ModelKamino) -> list[int]:
+    """
+    Evaluates the contact-pair term of Newton's contact heuristic for each world.
+
+    The contact pairs of each world, including pairs with global shapes, are
+    weighted by the average contacts per pair of the world's colliding
+    non-plane shapes, but at least ``_RIGID_CONTACTS_PER_PRIMITIVE_PAIR``.
+    Pairs between two global shapes belong to no world, as in the pair bound.
+    """
+    num_worlds = model.size.num_worlds
+    pairs = model.geoms.collidable_pairs
+    if pairs is None or model.geoms.num_collidable_pairs == 0:
+        return [0] * num_worlds
+
+    pairs_np = pairs.numpy()
+    geom_world = model.geoms.wid.numpy()
+    world_a = geom_world[pairs_np[:, 0]]
+    world_b = geom_world[pairs_np[:, 1]]
+    pair_world = np.where(world_a >= 0, world_a, world_b)
+    num_pairs = np.bincount(pair_world[pair_world >= 0], minlength=num_worlds)[:num_worlds].astype(np.int64)
+
+    num_primitives, num_meshes, _ = _world_shape_counts(model)
+    num_non_planes = num_primitives + num_meshes
+    weighted_contacts = num_primitives * _RIGID_CONTACTS_PER_PRIMITIVE_PAIR + num_meshes * _RIGID_CONTACTS_PER_MESH_PAIR
+    average_contacts = weighted_contacts // np.maximum(num_non_planes, 1)
+    contacts_per_pair = np.maximum(average_contacts, _RIGID_CONTACTS_PER_PRIMITIVE_PAIR)
+    return [int(bound) for bound in num_pairs * contacts_per_pair]
 
 
 def _scale_down_to_total(values: Sequence[int], total: int) -> list[int]:

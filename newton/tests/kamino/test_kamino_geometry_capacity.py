@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import logging
 import unittest
 from dataclasses import FrozenInstanceError
 
@@ -18,6 +19,7 @@ from newton._src.solvers.kamino._src.geometry.capacity import (
     ContactCapacity,
     _scale_down_to_total,
     _world_neighbor_bounds,
+    _world_pair_count_bounds,
 )
 from newton._src.solvers.kamino.config import CollisionDetectorConfig
 from newton.tests.kamino import setup_tests, test_context
@@ -197,8 +199,8 @@ class TestContactCapacityResolve(unittest.TestCase):
         self.assertEqual(capacity.model_max_contacts, cap)
         self.assertTrue(all(c <= p for c, p in zip(capacity.world_max_contacts, pair_bound, strict=True)))
 
-    def test_rigid_contact_max_caps_but_never_raises(self):
-        """Treat a known Newton capacity as an upper bound that only ever scales Kamino down."""
+    def test_rigid_contact_max_caps_without_warning(self):
+        """Scale Kamino down to a known Newton capacity, never up, and report the cap only at info level."""
         model = _make_nunchaku_worlds(self.default_device, world_count=3)
         pair_bound = list(model.geoms.world_minimum_contacts)
         total = sum(pair_bound)
@@ -207,11 +209,21 @@ class TestContactCapacityResolve(unittest.TestCase):
             unchanged = ContactCapacity.resolve_from(model, rigid_contact_max=total + 100)
         self.assertEqual(list(unchanged.world_max_contacts), pair_bound)
 
-        with self.assertLogs(level="WARNING") as logs:
+        with self.assertLogs(level="INFO") as logs:
             capped = ContactCapacity.resolve_from(model, rigid_contact_max=total // 2)
         self.assertEqual(capped.model_max_contacts, total // 2)
         self.assertTrue(all(c <= p for c, p in zip(capped.world_max_contacts, pair_bound, strict=True)))
-        self.assertTrue(any("rigid_contact_max" in line for line in logs.output))
+        self.assertTrue(any("rigid_contact_max" in record.getMessage() for record in logs.records))
+        self.assertTrue(all(record.levelno < logging.WARNING for record in logs.records))
+
+    def test_float_max_contacts_caps_like_an_integer(self):
+        """Cap with an integral float max_contacts exactly as with the equivalent integer."""
+        model = _make_nunchaku_worlds(self.default_device, world_count=3)
+        cap = sum(model.geoms.world_minimum_contacts) // 3
+
+        as_float = ContactCapacity.resolve_from(model, config=CollisionDetectorConfig(max_contacts=float(cap)))
+        as_int = ContactCapacity.resolve_from(model, config=CollisionDetectorConfig(max_contacts=cap))
+        self.assertEqual(as_float, as_int)
 
     def test_rigid_contact_max_zero_gives_empty_capacity(self):
         """Resolve to zero contact capacity when Newton publishes no rigid contacts."""
@@ -256,6 +268,27 @@ class TestContactCapacityResolve(unittest.TestCase):
         model = _make_box_worlds(self.default_device, [2, 3])
         # Each box adds 20 neighbors x 5 contacts / 2 = 50, and the global plane adds 5 per box.
         self.assertEqual(_world_neighbor_bounds(model), [2 * 50 + 2 * 5, 3 * 50 + 3 * 5])
+
+    def test_pair_count_bound_counts_pairs_per_world(self):
+        """Weight the contact pairs of each world, including pairs with global shapes, by contacts per pair."""
+        model = _make_box_worlds(self.default_device, [2, 3])
+        # World 0 has 2 box-plane and 1 box-box pairs, world 1 has 3 box-plane and 3 box-box pairs.
+        self.assertEqual(_world_pair_count_bounds(model), [3 * 5, 6 * 5])
+
+    def test_mesh_world_is_bounded_by_pipeline_estimate(self):
+        """Bound a world of mesh shapes on a plane by the pipeline estimate rather than the per-pair reduction cap."""
+        builder = newton.ModelBuilder()
+        builder.add_ground_plane()
+        body = builder.add_body(xform=wp.transform(wp.vec3(0.0, 0.0, 1.0), wp.quat_identity()))
+        mesh = newton.Mesh.create_box(0.25, 0.25, 0.25)
+        for index in range(12):
+            builder.add_shape_mesh(body, xform=wp.transform(wp.vec3(index, 0.0, 0.0), wp.quat_identity()), mesh=mesh)
+        model = ModelKamino.from_newton(builder.finalize(device=self.default_device))
+
+        # Twelve mesh-plane pairs reserve 12 x 255 contacts, while the pipeline estimate is 12 x 40.
+        self.assertEqual(list(model.geoms.world_minimum_contacts), [12 * MAX_CONTACTS_PER_PAIR])
+        self.assertEqual(_world_pair_count_bounds(model), [12 * 40])
+        self.assertEqual(ContactCapacity.resolve_from(model).world_max_contacts, (1000,))
 
     def test_heightfield_world_reserves_reduction_cap(self):
         """Reserve the per-pair reduction cap for a capsule resting on a heightfield."""

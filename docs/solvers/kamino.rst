@@ -108,15 +108,22 @@ both contact sources: Kamino's internal collision detection
 :class:`~newton.CollisionPipeline`.
 
 By default, the capacity of a world is the sum of the per-shape-pair contact
-limits of its colliding shape pairs, capped at the larger of 1000 and a
-neighbor-count estimate for that world that uses the same contact weights as the
-:class:`~newton.CollisionPipeline` capacity estimate. Two settings of
-``config.collision_detector`` override this default:
+limits of its colliding shape pairs, capped at the larger of 1000 and the
+:class:`~newton.CollisionPipeline` capacity estimate evaluated for that world.
+Pairs that involve a mesh or heightfield reserve the 255 contacts that Newton's
+contact reduction can keep for one pair, so worlds with several such pairs
+usually reach the cap. Two settings of ``config.collision_detector`` override
+this default:
 
 * ``max_contacts_per_world`` gives every world exactly this capacity. Use it to
   bound memory in contact-rich scenes; ``0`` allocates no contacts.
 * ``max_contacts`` caps the total. The per-world capacities are scaled down
   proportionally so that they sum to at most this value.
+
+Dense dynamics, the PADMM default, allocate per-world matrices whose size grows
+with the square of the per-world capacity. For many worlds with mesh or
+heightfield contacts, set ``max_contacts_per_world`` or use
+``sparse_dynamics=True``.
 
 .. code-block:: python
 
@@ -128,10 +135,11 @@ neighbor-count estimate for that world that uses the same contact weights as the
 it is ``None`` when the solver is constructed, Kamino sets it to its own total,
 so a :class:`~newton.CollisionPipeline` created afterwards allocates a matching
 buffer. If it is already set, by the user or by an existing pipeline, Kamino
-treats it as an upper bound: the per-world capacities are scaled down to fit,
-and a warning reports the reduction. Construct the solver before the pipeline to
-keep Kamino's full capacity, or set ``model.rigid_contact_max`` explicitly to
-choose one memory budget for both.
+treats it as an upper bound and scales the per-world capacities down to fit.
+Kamino warns only if this leaves a world that has colliding shape pairs without
+any capacity. Construct the solver before the pipeline to keep Kamino's full
+capacity, or set ``model.rigid_contact_max`` explicitly to choose one memory
+budget for both.
 
 When a step generates more contacts than a world can hold, Kamino keeps the
 contacts that fit, drops the rest, and prints a warning for that step. Raise

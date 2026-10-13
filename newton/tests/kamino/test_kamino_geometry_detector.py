@@ -77,6 +77,17 @@ class TestCollisionDetectorConfig(unittest.TestCase):
             warnings.simplefilter("error", DeprecationWarning)
             CollisionDetector.Config(**config.__dict__)
 
+    def test_04_integral_float_capacities_are_coerced(self):
+        """Coerce integral float contact capacities to integers and reject fractional ones."""
+        config = CollisionDetector.Config(max_contacts=1e3, max_contacts_per_world=64.0)
+        self.assertEqual((config.max_contacts, config.max_contacts_per_world), (1000, 64))
+        self.assertIs(type(config.max_contacts), int)
+        self.assertIs(type(config.max_contacts_per_world), int)
+        with self.assertRaises(TypeError):
+            CollisionDetector.Config(max_contacts=2.5)
+        with self.assertRaises(TypeError):
+            CollisionDetector.Config(max_contacts_per_world=True)
+
 
 class TestGeometryCollisionDetector(unittest.TestCase):
     def setUp(self):
