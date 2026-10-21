@@ -213,6 +213,12 @@ class RigidBodiesData:
     w_f_i: wp.array[wp.spatial_vectorf] | None = None
     """
     Joint friction wrench applied to each body (in world coordinates) [N, N·m].
+
+    When the dual problem decouples joint friction from the joint dynamics (see
+    :meth:`DualProblem.expand_dynamic_friction_solution`), this holds the part of the friction
+    that acts on the bodies directly, and :attr:`w_j_i` the part that acts through the joint
+    dynamics row of the same DoF.
+
     Shape of ``(num_bodies,)``.
     """
 

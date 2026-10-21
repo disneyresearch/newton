@@ -260,6 +260,19 @@ class SolverKaminoImpl(SolverBase):
                 solver=None if uses_lox else linear_solver_type,
                 solver_kwargs=None if uses_lox else linear_solver_kwargs,
                 sparse=self._config.sparse_dynamics,
+                # PADMM solves joint friction decoupled from the joint dynamics, so it stays accurate
+                # when the joint inertia dominates the body inertia. The fused CR solver, DVI, and
+                # LOX operate on the body-space rows directly.
+                friction_in_joint_dynamics=self._config.dynamics_solver == "padmm"
+                and not issubclass(linear_solver_type, ConjugateResidualSolverFused),
+            )
+
+        # Allocate the impulses that act on the bodies when joint friction
+        # is decoupled from the joint dynamics (see `_update_constraints`)
+        self._body_lambdas = None
+        if self._problem_fd is not None and self._problem_fd.num_dynamic_friction_pairs > 0:
+            self._body_lambdas = wp.zeros(
+                self._model.size.sum_of_max_total_cts, dtype=wp.float32, device=self._model.device
             )
 
         # Allocate the forward dynamics solver on the device
@@ -1096,6 +1109,11 @@ class SolverKaminoImpl(SolverBase):
         Solves the forward dynamics sub-problem to compute constraint
         reactions and body wrenches effected through constraints.
         """
+        # The dual problem may solve joint friction decoupled from the joint dynamics, while the
+        # cached solution holds body-space rows (see `DualProblem.expand_dynamic_friction_solution`)
+        solution = self._solver_fd.data.solution
+        self._problem_fd.reduce_dynamic_friction_solution(solution.lambdas, solution.v_plus)
+
         if self._warmstart_mode > WarmStartMode.NONE:
             self._solver_fd.warmstart(
                 problem=self._problem_fd,
@@ -1111,6 +1129,14 @@ class SolverKaminoImpl(SolverBase):
         # Solve the dual problem to compute the constraint reactions
         self._solver_fd.solve(problem=self._problem_fd)
 
+        # Map decoupled joint friction back to the body-space rows, but compute body
+        # wrenches from the decoupled impulses to avoid summing cancelling impulses
+        body_lambdas = solution.lambdas
+        if self._body_lambdas is not None:
+            self._problem_fd.compute_dynamic_friction_body_impulses(solution.lambdas, self._body_lambdas)
+            self._problem_fd.expand_dynamic_friction_solution(solution.lambdas, solution.v_plus)
+            body_lambdas = self._body_lambdas
+
         # Compute the effective body wrenches applied by the set of
         # active constraints from the respective reaction multipliers
         compute_constraint_body_wrenches(
@@ -1120,7 +1146,7 @@ class SolverKaminoImpl(SolverBase):
             contacts=contacts,
             jacobians=self._jacobians,
             lambdas_offsets=self._problem_fd.data.vio,
-            lambdas_data=self._solver_fd.data.solution.lambdas,
+            lambdas_data=body_lambdas,
         )
 
         # Unpack the computed constraint multipliers to the respective joint-limit
@@ -1275,6 +1301,8 @@ class SolverKaminoImpl(SolverBase):
                     sigma = solution.sigma
                 else:
                     sigma = self._solver_fd.data.state.sigma
+                # Evaluate the dual metrics with the rows solved by the dual problem
+                self._problem_fd.reduce_dynamic_friction_solution(solution.lambdas, solution.v_plus)
                 self._metrics.evaluate(
                     sigma=sigma,
                     lambdas=solution.lambdas,
@@ -1288,6 +1316,7 @@ class SolverKaminoImpl(SolverBase):
                     contacts=contacts,
                     use_solution_velocity=uses_lox,
                 )
+                self._problem_fd.expand_dynamic_friction_solution(solution.lambdas, solution.v_plus)
 
     def _advance_time(self):
         """

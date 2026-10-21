@@ -891,6 +891,7 @@ class PADMMSolver:
         # Warm-start each constraint group from constraint states cached in the data containers
         if model.size.sum_of_num_joints > 0:
             self._warmstart_joint_constraints(model, data, problem, x_0, y_0, z_0)
+            problem.reduce_dynamic_friction_warmstart(x_0, y_0, z_0)
         if limits is not None and limits.model_max_limits_host > 0:
             self._warmstart_limit_constraints(model, data, limits, problem, x_0, y_0, z_0)
         if contacts is not None and contacts.model_max_contacts_host > 0:

@@ -56,6 +56,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import warp as wp
 
 from .....core.types import override
@@ -65,7 +66,11 @@ from ..core.math import FLOAT32_EPS, compute_gyroscopic_torque
 from ..core.model import ModelKamino
 from ..core.size import SizeKamino
 from ..core.types import vec6f
-from ..dynamics.delassus import BlockSparseMatrixFreeDelassusOperator, DelassusOperator
+from ..dynamics.delassus import (
+    BlockSparseMatrixFreeDelassusOperator,
+    DelassusOperator,
+    dynamic_friction_coupling,
+)
 from ..geometry.contacts import ContactsKamino
 from ..kinematics.jacobians import DenseSystemJacobians, SparseSystemJacobians
 from ..kinematics.limits import LimitsKamino
@@ -689,6 +694,134 @@ def _build_joint_effort_bias(
 
 
 @wp.kernel
+def _compute_dynamic_friction_coupling_dense(
+    # Inputs:
+    pair_wid: wp.array[wp.int32],
+    pair_friction_row: wp.array[wp.int32],
+    pair_dynamic_cts: wp.array[wp.int32],
+    data_joints_inv_m_j: wp.array[wp.float32],
+    problem_dim: wp.array[wp.int32],
+    problem_mio: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_D: wp.array[wp.float32],
+    # Outputs:
+    pair_c: wp.array[wp.float32],
+    pair_row_scale: wp.array[wp.float32],
+):
+    """Compute the change of variables of each dynamic-friction pair from the body-space Delassus diagonal."""
+    pid = wp.tid()
+    wid = pair_wid[pid]
+    ncts = problem_dim[wid]
+    row = pair_friction_row[pid]
+    local_row = row - problem_vio[wid]
+    # The friction row has no regularization, so its diagonal is the body-space term of the DoF
+    c = dynamic_friction_coupling(
+        problem_D[problem_mio[wid] + ncts * local_row + local_row], data_joints_inv_m_j[pair_dynamic_cts[pid]]
+    )
+    pair_c[pid] = c
+    pair_row_scale[row] = 1.0 + c
+
+
+@wp.kernel
+def _set_dynamic_friction_delassus_dense(
+    # Inputs:
+    pair_wid: wp.array[wp.int32],
+    pair_dynamic_row: wp.array[wp.int32],
+    pair_friction_row: wp.array[wp.int32],
+    pair_dynamic_cts: wp.array[wp.int32],
+    pair_c: wp.array[wp.float32],
+    data_joints_inv_m_j: wp.array[wp.float32],
+    problem_dim: wp.array[wp.int32],
+    problem_mio: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    # Outputs:
+    problem_D: wp.array[wp.float32],
+):
+    """Add the joint-space terms of each dynamic-friction pair to the row-scaled Delassus matrix."""
+    pid = wp.tid()
+    wid = pair_wid[pid]
+    ncts = problem_dim[wid]
+    mio = problem_mio[wid]
+    vio = problem_vio[wid]
+    row_dyn = pair_dynamic_row[pid] - vio
+    row_fric = pair_friction_row[pid] - vio
+    c = pair_c[pid]
+    problem_D[mio + ncts * row_fric + row_fric] += c * c * data_joints_inv_m_j[pair_dynamic_cts[pid]]
+    # The change of variables decouples the pair, so set the cancelling terms to exact zeros
+    problem_D[mio + ncts * row_dyn + row_fric] = 0.0
+    problem_D[mio + ncts * row_fric + row_dyn] = 0.0
+
+
+@wp.kernel
+def _build_free_velocity_dynamic_friction(
+    # Inputs:
+    pair_dynamic_row: wp.array[wp.int32],
+    pair_friction_row: wp.array[wp.int32],
+    pair_c: wp.array[wp.float32],
+    # Outputs:
+    problem_v_f: wp.array[wp.float32],
+):
+    """Apply the change of variables of each dynamic-friction pair to the free velocity."""
+    pid = wp.tid()
+    problem_v_f[pair_friction_row[pid]] += pair_c[pid] * problem_v_f[pair_dynamic_row[pid]]
+
+
+@wp.kernel
+def _transform_dynamic_friction_solution(
+    # Inputs:
+    pair_dynamic_row: wp.array[wp.int32],
+    pair_friction_row: wp.array[wp.int32],
+    pair_c: wp.array[wp.float32],
+    sign: wp.float32,
+    # Outputs:
+    lambdas: wp.array[wp.float32],
+    v_plus: wp.array[wp.float32],
+):
+    """Map the rows of dynamic-friction pairs to (``sign=1``) or from (``sign=-1``) decoupled variables."""
+    pid = wp.tid()
+    row_dyn = pair_dynamic_row[pid]
+    row_fric = pair_friction_row[pid]
+    c = sign * pair_c[pid]
+    lambdas[row_dyn] -= c * lambdas[row_fric]
+    v_plus[row_fric] += c * v_plus[row_dyn]
+
+
+@wp.kernel
+def _transform_dynamic_friction_warmstart(
+    # Inputs:
+    pair_dynamic_row: wp.array[wp.int32],
+    pair_friction_row: wp.array[wp.int32],
+    pair_c: wp.array[wp.float32],
+    problem_P: wp.array[wp.float32],
+    # Outputs:
+    x: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    z: wp.array[wp.float32],
+):
+    """Map preconditioned warm-start iterates of dynamic-friction pairs to decoupled variables."""
+    pid = wp.tid()
+    row_dyn = pair_dynamic_row[pid]
+    row_fric = pair_friction_row[pid]
+    ratio = pair_c[pid] * problem_P[row_fric] / problem_P[row_dyn]
+    x[row_dyn] -= ratio * x[row_fric]
+    y[row_dyn] -= ratio * y[row_fric]
+    z[row_fric] += ratio * z[row_dyn]
+
+
+@wp.kernel
+def _scale_dynamic_friction_impulses(
+    # Inputs:
+    pair_friction_row: wp.array[wp.int32],
+    pair_c: wp.array[wp.float32],
+    # Outputs:
+    lambdas: wp.array[wp.float32],
+):
+    """Scale the impulse of each decoupled friction row to the part that acts on the bodies directly."""
+    pid = wp.tid()
+    lambdas[pair_friction_row[pid]] *= 1.0 + pair_c[pid]
+
+
+@wp.kernel
 def _build_free_velocity_bias_limits(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],
@@ -1214,6 +1347,7 @@ class DualProblem:
         config: list[DualProblem.Config] | DualProblem.Config | None = None,
         compute_h: bool = False,
         sparse: bool = True,
+        friction_in_joint_dynamics: bool = False,
     ):
         """
         Constructs a dual problem interface container.
@@ -1235,6 +1369,15 @@ class DualProblem:
                 Defaults to `None`, indicating that default config will be used for all worlds.
             compute_h: Set to `True` to enable the computation of the nonlinear
                 generalized forces vectors in construction of the dual problem.
+                Defaults to `False`.
+            sparse: Set to `True` to use the matrix-free sparse Delassus operator.
+            friction_in_joint_dynamics: Set to `True` to decouple the Coulomb friction row of
+                each joint DoF that also has a joint dynamics row (armature, damping, or implicit
+                PD) from that row by a change of variables, see
+                :meth:`expand_dynamic_friction_solution`. The solution is the same, but it no
+                longer requires a relative accuracy of ``I / m_j`` to resolve the velocity change
+                of a body with inertia ``I`` when the joint inertia ``m_j`` dominates. The solver
+                must map its solution with :meth:`expand_dynamic_friction_solution`.
                 Defaults to `False`.
         """
         # Ensure Jacobians are given if model is provided.
@@ -1258,6 +1401,30 @@ class DualProblem:
 
         self._sparse: bool = sparse
         """Flag to indicate whether the dual uses a sparse data representation."""
+
+        self._friction_in_joint_dynamics: bool = friction_in_joint_dynamics
+        """Flag to indicate whether joint friction rows are decoupled from joint dynamics rows."""
+
+        self._num_dynamic_friction_pairs: int = 0
+        """Number of joint friction rows that share their DoF with a joint dynamics row."""
+
+        self._pair_wid: wp.array[wp.int32] | None = None
+        """World index of each dynamic-friction pair."""
+
+        self._pair_dynamic_row: wp.array[wp.int32] | None = None
+        """Constraint-vector index of the joint dynamics row of each dynamic-friction pair."""
+
+        self._pair_friction_row: wp.array[wp.int32] | None = None
+        """Constraint-vector index of the joint friction row of each dynamic-friction pair."""
+
+        self._pair_dynamic_cts: wp.array[wp.int32] | None = None
+        """Index into the joint dynamics arrays (e.g. ``inv_m_j``) of each dynamic-friction pair."""
+
+        self._pair_c: wp.array[wp.float32] | None = None
+        """Change-of-variables coefficient ``c`` of each dynamic-friction pair, updated on each build."""
+
+        self._pair_row_scale: wp.array[wp.float32] | None = None
+        """Dense-only row scale ``1 + c`` of the friction rows, and one for all other rows."""
 
         # Finalize the dual problem data if a model is provided
         if model is not None:
@@ -1331,6 +1498,13 @@ class DualProblem:
         Returns whether the dual problem is using sparse operators.
         """
         return self._sparse
+
+    @property
+    def num_dynamic_friction_pairs(self) -> int:
+        """
+        Returns the number of joint friction rows decoupled from joint dynamics rows.
+        """
+        return self._num_dynamic_friction_pairs
 
     ###
     # Operations
@@ -1509,6 +1683,10 @@ class DualProblem:
                     P=wp.ones(shape=(self._delassus.num_maxdims,), dtype=wp.float32),
                 )
 
+        # Pair the joint friction rows with the joint dynamics rows of the same DoFs
+        if self._friction_in_joint_dynamics:
+            self._finalize_dynamic_friction_pairs(model)
+
     def zero(self):
         if self._compute_h:
             self._data.h.zero_()
@@ -1606,6 +1784,10 @@ class DualProblem:
                 device=self.device,
             )
 
+        # Decouple the paired joint friction rows from the joint dynamics rows
+        if self._num_dynamic_friction_pairs > 0:
+            self._build_dynamic_friction(data)
+
         # Optionally build and apply the Delassus diagonal preconditioner
         if any(s.dynamics.preconditioning for s in self._config):
             self._build_dual_preconditioner()
@@ -1628,6 +1810,106 @@ class DualProblem:
                     ],
                     device=self.device,
                 )
+
+    def reduce_dynamic_friction_solution(self, lambdas: wp.array[wp.float32], v_plus: wp.array[wp.float32]):
+        """
+        Maps a solution in the body-space rows of the joints to the rows solved by this problem.
+
+        This is the inverse of :meth:`expand_dynamic_friction_solution`, and does nothing unless
+        joint friction is decoupled from the joint dynamics.
+
+        Args:
+            lambdas: Constraint impulses, modified in place.
+            v_plus: Post-event constraint-space velocities, modified in place.
+        """
+        self._transform_dynamic_friction_solution(lambdas, v_plus, 1.0)
+
+    def expand_dynamic_friction_solution(self, lambdas: wp.array[wp.float32], v_plus: wp.array[wp.float32]):
+        """
+        Maps a solution of this problem back to the body-space rows of the joints.
+
+        When joint friction is decoupled from the joint dynamics, each friction row ``f`` that
+        shares its DoF and Jacobian ``J`` with a joint dynamics row ``a`` is solved in the
+        variables ``lambda_a' = lambda_a - c * lambda_f`` and ``lambda_f' = lambda_f``, with
+
+        ```
+        d = J M^-1 J^T,   r = inv_m_j,   c = -d / (d + r).
+        ```
+
+        This choice makes the pair's off-diagonal Delassus entry vanish. The friction row then
+        acts on the bodies with the scaled Jacobian ``(1 + c) J`` and on the joint dynamics with
+        the compliance ``c^2 r``, so its diagonal is ``d r / (d + r)``, i.e. the inverse of the
+        combined body and joint inertia of the DoF.
+
+        In the original rows, the friction and joint dynamics impulses nearly cancel when the
+        joint inertia ``1 / r`` is much larger than the body inertia ``1 / d``: the body velocity
+        change then requires a relative accuracy of ``r / d`` in each impulse, and the problem is
+        nearly singular. In the decoupled rows it is not, while ``c`` tends to zero, and the
+        rows to the original ones, when the body inertia dominates.
+
+        This does nothing unless joint friction is decoupled from the joint dynamics.
+
+        Args:
+            lambdas: Constraint impulses, modified in place.
+            v_plus: Post-event constraint-space velocities, modified in place.
+        """
+        self._transform_dynamic_friction_solution(lambdas, v_plus, -1.0)
+
+    def reduce_dynamic_friction_warmstart(
+        self, x: wp.array[wp.float32], y: wp.array[wp.float32], z: wp.array[wp.float32]
+    ):
+        """
+        Maps preconditioned warm-start iterates in the body-space rows of the joints to the rows
+        solved by this problem (see :meth:`expand_dynamic_friction_solution`).
+
+        Args:
+            x: Preconditioned primal iterate, modified in place.
+            y: Preconditioned slack iterate, modified in place.
+            z: Preconditioned dual (velocity) iterate, modified in place.
+        """
+        if self._num_dynamic_friction_pairs == 0:
+            return
+        wp.launch(
+            _transform_dynamic_friction_warmstart,
+            dim=self._num_dynamic_friction_pairs,
+            inputs=[
+                # Inputs:
+                self._pair_dynamic_row,
+                self._pair_friction_row,
+                self._pair_c,
+                self._data.P,
+                # Outputs:
+                x,
+                y,
+                z,
+            ],
+            device=self.device,
+        )
+
+    def compute_dynamic_friction_body_impulses(self, lambdas: wp.array[wp.float32], body_lambdas: wp.array[wp.float32]):
+        """
+        Computes impulses of a solution of this problem that act on the bodies through the
+        constraint Jacobians.
+
+        With joint friction decoupled from the joint dynamics, each paired friction row acts on
+        the bodies with the Jacobian ``(1 + c) J`` (see :meth:`expand_dynamic_friction_solution`).
+        Body wrenches computed from these impulses avoid summing the nearly cancelling impulses
+        of the original rows.
+
+        Args:
+            lambdas: Constraint impulses of a solution of this problem.
+            body_lambdas: Output impulses to apply with the constraint Jacobians.
+        """
+        wp.copy(body_lambdas, lambdas)
+        if self._num_dynamic_friction_pairs == 0:
+            return
+        wp.launch(
+            _scale_dynamic_friction_impulses,
+            dim=self._num_dynamic_friction_pairs,
+            inputs=[self._pair_friction_row, self._pair_c],
+            outputs=[body_lambdas],
+            device=self.device,
+        )
 
     ###
     # Internals
@@ -1659,6 +1941,150 @@ class DualProblem:
             return config
         else:
             raise TypeError(f"Expected List[DualProblem.Config] or DualProblem.Config, got {type(config)}")
+
+    def _finalize_dynamic_friction_pairs(self, model: ModelKamino):
+        """
+        Pairs each joint friction row with the joint dynamics row of the same DoF, if any.
+        """
+        if model.size.sum_of_num_friction_joint_cts == 0 or model.size.sum_of_num_dynamic_joint_cts == 0:
+            return
+        joints = model.joints
+        joint_wid = joints.wid.numpy()
+        num_dynamic_cts = joints.num_dynamic_cts.numpy()
+        num_friction_cts = joints.num_friction_cts.numpy()
+        dynamic_cts_offset = joints.dynamic_cts_offset.numpy()
+        friction_cts_offset = joints.friction_cts_offset.numpy()
+        dynamic_cts_axis = joints.dynamic_cts_axis.numpy()
+        friction_cts_axis = joints.friction_cts_axis.numpy()
+        dynamic_row_offset = joints.dynamic_cts_offset_total_cts.numpy()
+        friction_row_offset = joints.friction_cts_offset_total_cts.numpy()
+        pairs = []
+        for jid in np.flatnonzero((num_dynamic_cts > 0) & (num_friction_cts > 0)):
+            start = dynamic_cts_offset[jid]
+            dynamic_axes = dynamic_cts_axis[start : start + num_dynamic_cts[jid]]
+            for j in range(num_friction_cts[jid]):
+                matches = np.flatnonzero(dynamic_axes == friction_cts_axis[friction_cts_offset[jid] + j])
+                if matches.size > 0:
+                    k = int(matches[0])
+                    pairs.append((joint_wid[jid], dynamic_row_offset[jid] + k, friction_row_offset[jid] + j, start + k))
+        self._num_dynamic_friction_pairs = len(pairs)
+        if not pairs:
+            return
+        pairs = np.asarray(pairs, dtype=np.int32)
+        with wp.ScopedDevice(self._device):
+            self._pair_wid = wp.array(pairs[:, 0], dtype=wp.int32)
+            self._pair_dynamic_row = wp.array(pairs[:, 1], dtype=wp.int32)
+            self._pair_friction_row = wp.array(pairs[:, 2], dtype=wp.int32)
+            self._pair_dynamic_cts = wp.array(pairs[:, 3], dtype=wp.int32)
+            self._pair_c = wp.zeros(len(pairs), dtype=wp.float32)
+            if not self._sparse:
+                self._pair_row_scale = wp.ones(model.size.sum_of_max_total_cts, dtype=wp.float32)
+        if self._sparse:
+            self._delassus.set_dynamic_friction_pairs(
+                self._pair_wid, self._pair_dynamic_row, self._pair_friction_row, self._pair_dynamic_cts, self._pair_c
+            )
+
+    def _build_dynamic_friction(self, data: DataKamino):
+        """
+        Decouples the paired joint friction rows from the joint dynamics rows.
+
+        See :meth:`expand_dynamic_friction_solution` for the change of variables. This relies on
+        each paired friction row having the same Jacobian as its joint dynamics row, which holds
+        since both are built from the same DoF. The sparse Delassus operator applies the change
+        of variables to its matrix-free products itself.
+        """
+        if self._sparse:
+            self._delassus.update_dynamic_friction_coupling()
+        else:
+            wp.launch(
+                _compute_dynamic_friction_coupling_dense,
+                dim=self._num_dynamic_friction_pairs,
+                inputs=[
+                    # Inputs:
+                    self._pair_wid,
+                    self._pair_friction_row,
+                    self._pair_dynamic_cts,
+                    data.joints.inv_m_j,
+                    self._data.dim,
+                    self._data.mio,
+                    self._data.vio,
+                    self._data.D,
+                    # Outputs:
+                    self._pair_c,
+                    self._pair_row_scale,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _apply_dual_preconditioner_to_matrix,
+                dim=(self._size.num_worlds, self.delassus._max_of_max_total_D_size),
+                inputs=[
+                    # Inputs:
+                    self._data.dim,
+                    self._data.mio,
+                    self._data.vio,
+                    self._pair_row_scale,
+                    # Outputs:
+                    self._data.D,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _set_dynamic_friction_delassus_dense,
+                dim=self._num_dynamic_friction_pairs,
+                inputs=[
+                    # Inputs:
+                    self._pair_wid,
+                    self._pair_dynamic_row,
+                    self._pair_friction_row,
+                    self._pair_dynamic_cts,
+                    self._pair_c,
+                    data.joints.inv_m_j,
+                    self._data.dim,
+                    self._data.mio,
+                    self._data.vio,
+                    # Outputs:
+                    self._data.D,
+                ],
+                device=self.device,
+            )
+        wp.launch(
+            _build_free_velocity_dynamic_friction,
+            dim=self._num_dynamic_friction_pairs,
+            inputs=[
+                # Inputs:
+                self._pair_dynamic_row,
+                self._pair_friction_row,
+                self._pair_c,
+                # Outputs:
+                self._data.v_f,
+            ],
+            device=self.device,
+        )
+
+    def _transform_dynamic_friction_solution(
+        self, lambdas: wp.array[wp.float32], v_plus: wp.array[wp.float32], sign: float
+    ):
+        """
+        Maps a solution between the body-space rows of the joints and the rows solved by this problem.
+        """
+        if self._num_dynamic_friction_pairs == 0:
+            return
+        wp.launch(
+            _transform_dynamic_friction_solution,
+            dim=self._num_dynamic_friction_pairs,
+            inputs=[
+                # Inputs:
+                self._pair_dynamic_row,
+                self._pair_friction_row,
+                self._pair_c,
+                wp.float32(sign),
+                # Outputs:
+                lambdas,
+                v_plus,
+            ],
+            device=self.device,
+        )
 
     def _build_nonlinear_generalized_force(model: ModelKamino, data: DataKamino, problem: DualProblemData):
         """

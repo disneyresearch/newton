@@ -1,0 +1,1 @@
+Fix joint friction adding energy in `SolverKamino` with PADMM when a joint's armature is much larger than the inertia of the bodies it connects. Friction rows are now decoupled from the joint's armature, damping, or implicit PD row, so friction decelerates the joint by the exact amount instead of reversing its motion.
