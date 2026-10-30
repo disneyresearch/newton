@@ -11,6 +11,7 @@ See the :mod:`newton._src.solvers.kamino.solvers.padmm` module for a detailed de
 
 from __future__ import annotations
 
+import numpy as np
 import warp as wp
 
 from ......sim import ModelFlags
@@ -36,6 +37,7 @@ from .kernels import (
     _project_to_feasible_cone,
     _reset_solver_data,
     _scale_warmstart_forces,
+    _update_bilateral_consistency,
     _update_delassus_proximal_regularization,
     _update_delassus_proximal_regularization_sparse,
     _warmstart_contact_constraints,
@@ -251,6 +253,19 @@ class PADMMSolver:
             PADMMPenaltyUpdate.from_string(c.penalty_update_method) != PADMMPenaltyUpdate.FIXED for c in self._config
         )
 
+        # Allocate the scratch storage of the bilateral consistency step (dense problems only)
+        self._use_bilateral_consistency = any(c.bilateral_consistency for c in self._config)
+        self._consistency_L = None
+        if self._use_bilateral_consistency:
+            nb = model.info.num_joint_bilateral_cts.numpy().astype(np.int64)
+            L_offsets = np.concatenate(([0], np.cumsum(nb * nb)[:-1]))
+            g_offsets = np.concatenate(([0], np.cumsum(nb)[:-1]))
+            with wp.ScopedDevice(self._device):
+                self._consistency_L = wp.zeros(max(int(np.sum(nb * nb)), 1), dtype=wp.float64)
+                self._consistency_g = wp.zeros(max(int(np.sum(nb)), 1), dtype=wp.float64)
+                self._consistency_L_offset = wp.array(L_offsets.astype(np.int32), dtype=wp.int32)
+                self._consistency_g_offset = wp.array(g_offsets.astype(np.int32), dtype=wp.int32)
+
         # Compute the largest max iterations across all worlds
         # NOTE: This is needed to allocate the solver
         # info arrays if `collect_info` is enabled
@@ -425,6 +440,10 @@ class PADMMSolver:
         else:
             for _ in range(self._max_of_max_iters):
                 step_fn(problem)
+
+        # Make the bilateral multipliers consistent with the projected inequality multipliers
+        if self._consistency_L is not None and not problem.sparse:
+            self._update_bilateral_consistency(problem)
 
         # Update the final solution from the terminal PADMM state
         self._update_solution(problem)
@@ -1422,6 +1441,36 @@ class PADMMSolver:
     ###
     # Internals - Post-Solve Operations
     ###
+
+    def _update_bilateral_consistency(self, problem: DualProblem):
+        """
+        Corrects the terminal bilateral multipliers for the projection of the inequality multipliers.
+
+        Args:
+            problem: The dual forward dynamics problem to be solved.
+        """
+        wp.launch(
+            kernel=_update_bilateral_consistency,
+            dim=self._size.num_worlds,
+            inputs=[
+                # Inputs:
+                problem.data.dim,
+                problem.data.mio,
+                problem.data.vio,
+                problem.data.njc,
+                problem.data.D,
+                self._data.state.sigma,
+                self._data.state.x,
+                self._consistency_L_offset,
+                self._consistency_g_offset,
+                wp.float64(1.0e-7),
+                # Outputs:
+                self._consistency_L,
+                self._consistency_g,
+                self._data.state.y,
+            ],
+            device=self.device,
+        )
 
     def _update_solution(self, problem: DualProblem):
         """

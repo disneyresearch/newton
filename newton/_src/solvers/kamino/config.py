@@ -597,6 +597,16 @@ class PADMMSolverConfig:
     Defaults to `containers` to warmstart from the solver data containers.
     """
 
+    bilateral_consistency: bool = True
+    """
+    Makes the returned bilateral multipliers consistent with the projected inequality multipliers.
+
+    PADMM solves the bilateral rows against the unprojected iterate of the inequality rows. Without
+    this correction, the projection difference reaches the bodies amplified by the Delassus coupling
+    of the inequality rows, which is large for light bodies. Only used by the dense Delassus path.
+    Defaults to `True`.
+    """
+
     warmstart_scale: float = 0.9
     """
     Scale applied to cached constraint forces during warm-starting.\n

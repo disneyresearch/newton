@@ -61,6 +61,7 @@ __all__ = [
     "_project_to_feasible_cone",
     "_reset_solver_data",
     "_scale_warmstart_forces",
+    "_update_bilateral_consistency",
     "_update_delassus_proximal_regularization",
     "_update_delassus_proximal_regularization_sparse",
     "_warmstart_contact_constraints",
@@ -1920,6 +1921,108 @@ def _compute_final_desaxce_correction(
     solver_s[ccio_k] = 0.0
     solver_s[ccio_k + 1] = 0.0
     solver_s[ccio_k + 2] = problem_mu[cio + cid] * vt_norm
+
+
+@wp.kernel
+def _update_bilateral_consistency(
+    # Inputs:
+    problem_dim: wp.array[wp.int32],
+    problem_mio: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_njc: wp.array[wp.int32],
+    problem_D: wp.array[wp.float32],
+    solver_sigma: wp.array[wp.vec2f],
+    solver_x: wp.array[wp.float32],
+    scratch_L_offset: wp.array[wp.int32],
+    scratch_g_offset: wp.array[wp.int32],
+    pivot_tolerance: wp.float64,
+    # Outputs:
+    scratch_L: wp.array[wp.float64],
+    scratch_g: wp.array[wp.float64],
+    solver_y: wp.array[wp.float32],
+):
+    """Make the bilateral multipliers consistent with the projected inequality multipliers.
+
+    PADMM solves the bilateral rows together with the unprojected iterate ``x`` of the inequality
+    rows, but returns their projection ``y``. The difference reaches the bilateral rows as the
+    velocity error ``D_BI (y_I - x_I)``. This adds ``(D_BB)^+ D_BI (x_I - y_I)`` to the bilateral
+    multipliers to cancel it. The right-hand side lies in the range of ``D_BB``, so redundant
+    bilateral rows (zero pivots of the Cholesky factorization) are skipped.
+
+    One thread per world. Prototype: dense serial float64 factorization of ``D_BB``.
+    """
+    wid = wp.tid()
+    n = problem_dim[wid]
+    nb = problem_njc[wid]
+    if nb == 0 or n <= nb:
+        return
+    mio = problem_mio[wid]
+    vio = problem_vio[wid]
+    sigma = wp.float64(solver_sigma[wid][0])
+    lo = scratch_L_offset[wid]
+    go = scratch_g_offset[wid]
+
+    # Right-hand side g = D_BI (x_I - y_I), in preconditioned units
+    any_mismatch = bool(False)
+    for i in range(nb):
+        acc = wp.float64(0.0)
+        for j in range(nb, n):
+            d = solver_x[vio + j] - solver_y[vio + j]
+            if d != 0.0:
+                acc += wp.float64(problem_D[mio + n * i + j]) * wp.float64(d)
+        scratch_g[go + i] = acc
+        if acc != wp.float64(0.0):
+            any_mismatch = True
+    if not any_mismatch:
+        return
+
+    # Cholesky factorization of D_BB, with the proximal shift sigma removed from the stored diagonal.
+    # A pivot below pivot_tolerance times its diagonal marks a row as redundant and drops it.
+    for k in range(nb):
+        dkk = wp.float64(problem_D[mio + n * k + k]) - sigma
+        s = dkk
+        for p in range(k):
+            lkp = scratch_L[lo + nb * k + p]
+            s -= lkp * lkp
+        if s <= pivot_tolerance * wp.abs(dkk):
+            scratch_L[lo + nb * k + k] = wp.float64(0.0)
+            for i in range(k + 1, nb):
+                scratch_L[lo + nb * i + k] = wp.float64(0.0)
+        else:
+            lkk = wp.sqrt(s)
+            scratch_L[lo + nb * k + k] = lkk
+            for i in range(k + 1, nb):
+                t = wp.float64(problem_D[mio + n * i + k])
+                for p in range(k):
+                    t -= scratch_L[lo + nb * i + p] * scratch_L[lo + nb * k + p]
+                scratch_L[lo + nb * i + k] = t / lkk
+
+    # Forward substitution L w = g (w overwrites g), skipping dropped rows
+    for i in range(nb):
+        lii = scratch_L[lo + nb * i + i]
+        if lii == wp.float64(0.0):
+            scratch_g[go + i] = wp.float64(0.0)
+        else:
+            t = scratch_g[go + i]
+            for p in range(i):
+                t -= scratch_L[lo + nb * i + p] * scratch_g[go + p]
+            scratch_g[go + i] = t / lii
+
+    # Backward substitution L^T delta = w (delta overwrites g)
+    for ii in range(nb):
+        i = nb - 1 - ii
+        lii = scratch_L[lo + nb * i + i]
+        if lii == wp.float64(0.0):
+            scratch_g[go + i] = wp.float64(0.0)
+        else:
+            t = scratch_g[go + i]
+            for p in range(i + 1, nb):
+                t -= scratch_L[lo + nb * p + i] * scratch_g[go + p]
+            scratch_g[go + i] = t / lii
+
+    # Apply the correction to the returned bilateral multipliers
+    for i in range(nb):
+        solver_y[vio + i] = solver_y[vio + i] + wp.float32(scratch_g[go + i])
 
 
 @wp.kernel
