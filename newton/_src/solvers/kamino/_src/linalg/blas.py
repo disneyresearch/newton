@@ -12,6 +12,7 @@ from typing import Any
 import warp as wp
 
 from ..core.types import FloatType, vec7f
+from .core import dense_matrix_config
 from .sparse_matrix import BlockDType, BlockSparseMatrices
 
 ###
@@ -25,6 +26,8 @@ __all__ = [
     "block_sparse_transpose_matvec",
     "dense_gemv",
     "diag_gemv",
+    "reset_dense_blocks",
+    "zero_dense_blocks",
 ]
 
 ###
@@ -172,6 +175,33 @@ def _make_masked_zero_kernel_2d(dtype: Any):
         x[row_id, coeff_id] = dtype(0.0)
 
     return masked_zero_kernel_2d
+
+
+@cache
+def make_zero_dense_blocks_kernel(array_ndim: int = 1):
+    MatrixType0 = wp.array[wp.float32] if array_ndim == 1 else wp.array2d[wp.float32]
+
+    @wp.kernel(module="unique", module_options={"enable_backward": False, "default_grid_stride": False})
+    def _zero_dense_blocks(
+        # Inputs:
+        rows: wp.array[wp.int32],
+        cols: wp.array[wp.int32],
+        mio: wp.array[wp.int32],
+        stride: wp.int32,
+        # Outputs:
+        X_storage: MatrixType0,
+    ):
+        """Reset the active ``rows[b] * cols[b]`` prefix of each matrix block ``b`` to zero."""
+        bid, tid = wp.tid()
+        X = X_storage[bid] if wp.static(MatrixType0.ndim == 2) else X_storage
+
+        # Stride over the active entries of the block
+        size = rows[bid] * cols[bid]
+        start = mio[bid]
+        for i in range(tid, size, stride):
+            X[start + i] = wp.float32(0.0)
+
+    return _zero_dense_blocks
 
 
 @functools.cache
@@ -1133,6 +1163,62 @@ def dense_gemv(
         device=x.device,
         block_dim=block_dim,
     )
+
+
+def zero_dense_blocks(
+    X: wp.array[wp.float32] | wp.array2d[wp.float32],
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    mio: wp.array[wp.int32],
+    max_block_size: int,
+):
+    """
+    Reset the active ``rows[b] * cols[b]`` prefix of each dense matrix block ``b`` to zero.
+
+    Unlike ``X.zero_()``, the amount of memory written scales with the active block
+    sizes rather than with the allocated (maximum or padded) block sizes.
+
+    Args:
+        X: Dense matrix blocks stored flat or in one row per block.
+        rows: Active number of rows of each block.
+        cols: Active number of columns of each block.
+        mio: Matrix index offsets of each block, within ``X`` or within its row.
+        max_block_size: Upper bound on the active block sizes, bounding the launch grid.
+    """
+    num_blocks = rows.shape[0]
+    if num_blocks == 0 or max_block_size <= 0:
+        return
+
+    # Spread a fixed thread budget over the blocks, using whole warps
+    warp_size = 32
+    threads_per_block = -(-(1 << 22) // num_blocks)
+    threads_per_block = min(threads_per_block, max_block_size)
+    threads_per_block = max(warp_size, -(-threads_per_block // warp_size) * warp_size)
+    wp.launch(
+        make_zero_dense_blocks_kernel(X.ndim),
+        dim=(num_blocks, threads_per_block),
+        inputs=[rows, cols, mio, threads_per_block, X],
+        device=X.device,
+    )
+
+
+def reset_dense_blocks(
+    X: wp.array[wp.float32] | wp.array2d[wp.float32],
+    rows: wp.array[wp.int32],
+    cols: wp.array[wp.int32],
+    mio: wp.array[wp.int32],
+    max_block_size: int,
+):
+    """
+    Reset dense matrix blocks to zero, either fully or only over their active
+    entries, depending on :attr:`DenseMatrixConfig.partial_zero`.
+
+    See :func:`zero_dense_blocks` for a description of the arguments.
+    """
+    if dense_matrix_config.partial_zero:
+        zero_dense_blocks(X, rows, cols, mio, max_block_size)
+    else:
+        X.zero_()
 
 
 def block_sparse_matvec(

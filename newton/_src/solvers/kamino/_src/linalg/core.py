@@ -11,7 +11,9 @@ independent linear systems, including rectangular and square systems.
 from __future__ import annotations
 
 import logging
+import os
 from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any, Generic
 
 import numpy as np
@@ -28,20 +30,86 @@ logger = logging.getLogger(__name__)
 
 __all__ = [
     "DenseLinearOperatorData",
+    "DenseMatrixConfig",
+    "DenseMatrixLayout",
     "DenseRectangularMultiLinearInfo",
     "DenseSquareMultiLinearInfo",
+    "dense_matrix_config",
     "dense_matrix_layout",
     "make_dtype_tolerance",
     "validate_dense_matrix_shape",
 ]
 
 
+###
+# Dense storage configuration
+###
+
+
+class DenseMatrixLayout(IntEnum):
+    """Storage layout of dense multi-block matrices."""
+
+    AUTO = 0
+    """Packed flat storage, switching to one row per block if the total size exceeds the int32 indexing limit."""
+
+    FLAT = 1
+    """Packed flat storage, i.e. a 1D array with blocks stored back to back."""
+
+    ROWS = 2
+    """One row per block, i.e. a 2D array of shape ``(num_blocks, max_block_size)``."""
+
+
+@dataclass
+class DenseMatrixConfig:
+    """Global settings for the allocation and reset of dense multi-block matrices.
+
+    Settings are read when dense matrices are allocated or rebuilt, so they must be set before
+    constructing the solver. Defaults can be overridden with the environment variables
+    ``KAMINO_DENSE_LAYOUT`` (``auto``, ``flat`` or ``rows``), ``KAMINO_DENSE_ROW_ALIGNMENT``
+    and ``KAMINO_DENSE_PARTIAL_ZERO`` (``0`` or ``1``).
+    """
+
+    layout: DenseMatrixLayout = DenseMatrixLayout.AUTO
+    """Storage layout of dense multi-block matrices."""
+
+    row_alignment: int = 1
+    """Number of elements that the row stride is padded to a multiple of, in row layout."""
+
+    partial_zero: bool = False
+    """Whether to reset only the active sub-block of each matrix before rebuilding it, instead of the full buffer."""
+
+    @classmethod
+    def from_env(cls) -> DenseMatrixConfig:
+        """Create a config from the ``KAMINO_DENSE_*`` environment variables."""
+        layout = os.environ.get("KAMINO_DENSE_LAYOUT", "auto").strip().upper()
+        if layout not in DenseMatrixLayout.__members__:
+            raise ValueError(f"Invalid KAMINO_DENSE_LAYOUT '{layout}'. Expected one of 'auto', 'flat' or 'rows'.")
+        row_alignment = int(os.environ.get("KAMINO_DENSE_ROW_ALIGNMENT", "1"))
+        if row_alignment < 1:
+            raise ValueError(f"Invalid KAMINO_DENSE_ROW_ALIGNMENT {row_alignment}. Expected a positive integer.")
+        partial_zero = os.environ.get("KAMINO_DENSE_PARTIAL_ZERO", "0").strip().lower() in ("1", "true", "on")
+        return cls(layout=DenseMatrixLayout[layout], row_alignment=row_alignment, partial_zero=partial_zero)
+
+
+dense_matrix_config = DenseMatrixConfig.from_env()
+"""Global dense-matrix settings, read when allocating and rebuilding dense multi-block matrices."""
+
+
 def dense_matrix_layout(block_sizes: list[int]) -> tuple[tuple[int, ...], list[int]]:
     """Choose dense storage and local offsets for independent matrix blocks."""
     total_size = sum(block_sizes)
     index_limit = np.iinfo(np.int32).max
-    if total_size > index_limit:
+    layout = dense_matrix_config.layout
+    if layout == DenseMatrixLayout.FLAT and total_size > index_limit:
+        raise ValueError(
+            f"Flat dense storage of {total_size} elements exceeds the int32 indexing limit of {index_limit}. "
+            "Use the AUTO or ROWS dense matrix layout instead."
+        )
+    if layout == DenseMatrixLayout.ROWS or (layout == DenseMatrixLayout.AUTO and total_size > index_limit):
+        # Pad the row stride to the configured alignment
+        alignment = dense_matrix_config.row_alignment
         row_size = max(block_sizes, default=0)
+        row_size = ((row_size + alignment - 1) // alignment) * alignment
         return (len(block_sizes), row_size), [0] * len(block_sizes)
     offsets = []
     offset = 0

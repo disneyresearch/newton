@@ -32,6 +32,7 @@ import warp as wp
 
 from ......core.types import override
 from ...core.types import FloatType, to_warp_int32_array
+from ..blas import reset_dense_blocks
 from ..core import DenseLinearOperatorData, DenseSquareMultiLinearInfo, validate_dense_matrix_shape
 from ..linear import DirectSolver
 from . import rcm_batch as _rcm_batch
@@ -463,9 +464,10 @@ class LLTBlockedRCMSolver(DirectSolver[wp.float32, wp.int32]):
     def _reset_impl(self) -> None:
         if self._structural_ready is not None:
             self._structural_ready.zero_()
-        self._L.zero_()
+        info = self._operator.info
+        reset_dense_blocks(self._L, info.dim, info.dim, info.mio, info.max_dimension**2)
         self._y.zero_()
-        self._A_hat.zero_()
+        reset_dense_blocks(self._A_hat, info.dim, info.dim, info.mio, info.max_dimension**2)
         self._x_hat.zero_()
         self._P.zero_()
         self._rcm_scratch["permutation_valid"].zero_()

@@ -33,6 +33,7 @@ from ..core.types import (
 )
 from ..geometry.contacts import ContactsKamino
 from ..kinematics.limits import LimitsKamino
+from ..linalg.blas import reset_dense_blocks
 from ..linalg.core import dense_matrix_layout, validate_dense_matrix_shape
 from ..linalg.sparse_matrix import BlockDType, BlockSparseMatrices
 from ..linalg.sparse_operator import BlockSparseLinearOperators
@@ -1565,6 +1566,8 @@ class DenseSystemJacobians:
         J_dofs_shape, J_dofs_offsets = dense_matrix_layout(J_dofs_sizes)
         validate_dense_matrix_shape(J_cts_shape, wp.float32)
         validate_dense_matrix_shape(J_dofs_shape, wp.float32)
+        self._max_J_cts_size = max(J_cts_sizes, default=0)
+        self._max_J_dofs_size = max(J_dofs_sizes, default=0)
 
         # Use the model's device
         device = model.device
@@ -1602,9 +1605,22 @@ class DenseSystemJacobians:
                 Defaults to `True`.
         """
         # Optionally reset the Jacobian array data to zero
+        # NOTE: A partial reset covers the active constraint rows, which must be up to date in ``data.info``
         if reset_to_zero:
-            self._data.J_cts_data.zero_()
-            self._data.J_dofs_data.zero_()
+            reset_dense_blocks(
+                self._data.J_cts_data,
+                data.info.num_total_cts,
+                model.info.num_body_dofs,
+                self._data.J_cts_offsets,
+                self._max_J_cts_size,
+            )
+            reset_dense_blocks(
+                self._data.J_dofs_data,
+                model.info.num_joint_dofs,
+                model.info.num_body_dofs,
+                self._data.J_dofs_offsets,
+                self._max_J_dofs_size,
+            )
 
         # Build the joint constraints and actuation Jacobians
         if model.size.sum_of_num_joints > 0:

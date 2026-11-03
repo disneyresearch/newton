@@ -22,6 +22,7 @@ import warp as wp
 
 from .....core.types import override
 from . import conjugate, factorize
+from .blas import reset_dense_blocks
 from .conjugate_fused import MAX_BLOCKS_PER_ROW, build_row_index, build_transpose_index, make_fused_cr_kernel
 from .core import DenseLinearOperatorData, DenseSquareMultiLinearInfo, make_dtype_tolerance, validate_dense_matrix_shape
 from .sparse_matrix import (
@@ -533,7 +534,8 @@ class LLTSequentialSolver(DirectSolver[ScalarType, IndexType]):
 
     @override
     def _reset_impl(self) -> None:
-        self._L.zero_()
+        info = self._operator.info
+        reset_dense_blocks(self._L, info.dim, info.dim, info.mio, info.max_dimension**2)
         self._y.zero_()
         self._has_factors = False
 
@@ -710,7 +712,8 @@ class LLTBlockedSolver(DirectSolver[ScalarType, IndexType]):
 
     @override
     def _reset_impl(self) -> None:
-        self._L.zero_()
+        info = self._operator.info
+        reset_dense_blocks(self._L, info.dim, info.dim, info.mio, info.max_dimension**2)
         self._y.zero_()
         self._has_factors = False
 

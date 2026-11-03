@@ -79,8 +79,8 @@ from ..kinematics.constraints import get_max_constraints_per_world
 from ..kinematics.jacobians import ColMajorSparseConstraintJacobians, DenseSystemJacobians, SparseSystemJacobians
 from ..kinematics.limits import LimitsKamino
 from ..linalg import DenseLinearOperatorData, DenseSquareMultiLinearInfo, LinearSolverType
-from ..linalg.blas import _make_masked_zero_kernel_1d
-from ..linalg.core import dense_matrix_layout, validate_dense_matrix_shape
+from ..linalg.blas import _make_masked_zero_kernel_1d, zero_dense_blocks
+from ..linalg.core import dense_matrix_config, dense_matrix_layout, validate_dense_matrix_shape
 from ..linalg.linear import IterativeSolver
 from ..linalg.sparse_matrix import BlockDType, BlockSparseMatrices
 from ..linalg.sparse_operator import BlockSparseLinearOperators
@@ -1141,8 +1141,13 @@ class DelassusOperator:
             raise ValueError("Delassus matrix is not allocated. Call finalize() first.")
 
         # Initialize the Delassus matrix to zero
+        # NOTE: The dense build overwrites every active entry, so a partial reset is only needed for the sparse build
         if reset_to_zero:
-            self.zero()
+            if not dense_matrix_config.partial_zero:
+                self.zero()
+            elif not isinstance(jacobians, DenseSystemJacobians):
+                info = self._operator.info
+                zero_dense_blocks(self._operator.mat, info.dim, info.dim, info.mio, self._max_of_max_total_D_size)
 
         # Build the Delassus matrix parallelized over the upper triangle. Warp's
         # CUDA kernels use 32-thread warps, so pad the work count to keep the
