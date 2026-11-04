@@ -12,7 +12,6 @@ https://nvidia.github.io/warp/stable/user_guide/runtime.html#random-number-gener
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import get_args
 
 import numpy as np
 import warp as wp
@@ -364,7 +363,7 @@ class RandomJointController:
         if interval is not None:
             if isinstance(interval, float):
                 _interval = np.full(num_worlds, interval, dtype=np.float32)
-            elif isinstance(interval, get_args(FloatArrayLike)):
+            elif isinstance(interval, (np.ndarray, list)):
                 len_interval = len(interval)
                 if len_interval != num_worlds:
                     raise ValueError(
@@ -383,7 +382,7 @@ class RandomJointController:
         if scale is not None:
             if isinstance(scale, (int, float)):
                 _scale = np.full(num_joint_dofs, float(scale), dtype=np.float32)
-            elif isinstance(scale, get_args(FloatArrayLike)):
+            elif isinstance(scale, (np.ndarray, list)):
                 if len(scale) != num_joint_dofs:
                     raise ValueError(
                         f"Expected scale `FloatArrayLike` of length {num_joint_dofs}, but has {len(scale)}"
