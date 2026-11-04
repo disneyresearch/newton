@@ -28,6 +28,7 @@ from newton.tests.kamino.test_kamino_solver_kamino_joint_friction import (
     _run_spin_down_test,
 )
 from newton.tests.kamino.test_kamino_solvers_dvi import _build_five_box_stack
+from newton.tests.kamino.utils.extract import get_matrix_block
 from newton.tests.kamino.utils.make import make_containers, update_containers
 from newton.tests.kamino.utils.solver_configs import make_dvi_dense_config, make_dvi_sparse_config
 from newton.tests.utils import basics
@@ -830,7 +831,7 @@ class TestDVIAPGD(unittest.TestCase):
                 outputs.append((solver.data.solution.lambdas.numpy()[:n], solver.data.solution.v_plus.numpy()[:n]))
                 self.assertLess(float(np.max(np.abs(outputs[-1][1][:nb]))), 2e-4)
                 if not sparse:
-                    a = data.D.numpy()[: n * n].reshape(n, n).astype(np.float64)
+                    a = get_matrix_block(0, data.D.numpy(), [n]).astype(np.float64)
                     # Existing bilateral factorization regularizes after symmetric scaling.
                     scale = solver.data.state.bilateral_preconditioner.numpy()[:nb].astype(np.float64)
                     regularized_b = a[:nb, :nb] + np.diag(7e-7 / scale**2)

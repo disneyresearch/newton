@@ -12,6 +12,7 @@ import warp as wp
 
 import newton
 import newton._src.solvers.kamino.config as kamino_config
+from newton._src.solvers.kamino._src.linalg.core import dense_matrix_layout
 from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm import make_llt_blocked_rcm_solve_kernel
 from newton._src.solvers.kamino._src.solvers.dvi.response import make_response_kernel
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
@@ -301,8 +302,9 @@ class TestSolverKaminoJointFriction(unittest.TestCase):
         """Preserve analytical friction when reusing a forward-solved RHS."""
         self._check_compact_schur_friction(response_kernel, omega=1.0, max_iterations=8, joint_counts=(137,))
         if wp.get_device(test_context.device).is_cuda:
-            self.assertIn(mock.call(32, False, array_ndim=1), solve_kernel.call_args_list)
-            self.assertIn(mock.call(32, True, False, array_ndim=1), solve_kernel.call_args_list)
+            array_ndim = len(dense_matrix_layout([1])[0])
+            self.assertIn(mock.call(32, False, array_ndim=array_ndim), solve_kernel.call_args_list)
+            self.assertIn(mock.call(32, True, False, array_ndim=array_ndim), solve_kernel.call_args_list)
 
     @mock.patch(
         "newton._src.solvers.kamino._src.solvers.dvi.sparse.make_response_kernel",

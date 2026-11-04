@@ -20,7 +20,7 @@ from newton._src.solvers.kamino._src.kinematics.constraints import get_max_const
 from newton._src.solvers.kamino._src.kinematics.jacobians import SparseSystemJacobians
 from newton._src.solvers.kamino._src.kinematics.limits import LimitsKamino
 from newton._src.solvers.kamino._src.linalg import LLTSequentialSolver
-from newton._src.solvers.kamino._src.linalg.core import dense_matrix_layout
+from newton._src.solvers.kamino._src.linalg.core import DenseMatrixLayout, dense_matrix_layout
 from newton._src.solvers.kamino._src.utils.logger import reset_log_level, set_log_level
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.utils.extract import (
@@ -33,6 +33,7 @@ from newton.tests.kamino.utils.extract import (
 from newton.tests.kamino.utils.make import (
     make_containers,
     make_inverse_generalized_mass_matrices,
+    override_dense_matrix_config,
     update_containers,
 )
 from newton.tests.kamino.utils.print import debug_print_error_stats
@@ -63,7 +64,6 @@ def check_delassus_allocations(
     )
     D_maxdims = [int(delassus_maxdim_np[i]) for i in range(num_worlds)]
     D_sizes = [D_maxdims[i] * D_maxdims[i] for i in range(num_worlds)]
-    D_sizes_sum = sum(D_sizes)
 
     for i in range(num_worlds):
         fixture.assertEqual(
@@ -80,7 +80,7 @@ def check_delassus_allocations(
     fixture.assertEqual(delassus.info.dim.size, num_worlds)
     fixture.assertEqual(delassus.info.mio.size, num_worlds)
     fixture.assertEqual(delassus.info.vio.size, num_worlds)
-    fixture.assertEqual(delassus.D.size, D_sizes_sum)
+    fixture.assertEqual(delassus.D.shape, dense_matrix_layout(D_sizes)[0])
 
     # Check if the factorizer info data to the same as the Delassus info data
     fixture.assertEqual(delassus.info.maxdim.ptr, delassus.solver.operator.info.maxdim.ptr)
@@ -111,6 +111,12 @@ def _allocation_patches(error):
 
 
 class TestDelassusSizing(unittest.TestCase):
+    def setUp(self):
+        # Check the storage selection of the default dense matrix layout
+        config_override = override_dense_matrix_config(layout=DenseMatrixLayout.AUTO, row_alignment=1)
+        config_override.__enter__()
+        self.addCleanup(config_override.__exit__, None, None, None)
+
     def test_accept_dense_delassus_at_int32_limit(self):
         """Allow a dense buffer at the int32 limit to reach allocation without reserving its memory."""
         model = ModelKamino(

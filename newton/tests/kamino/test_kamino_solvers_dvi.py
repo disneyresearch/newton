@@ -23,6 +23,7 @@ from newton._src.solvers.kamino._src.integrators.euler import integrate_euler_se
 from newton._src.solvers.kamino._src.kinematics.constraints import unpack_constraint_solutions, update_constraints_info
 from newton._src.solvers.kamino._src.kinematics.jacobians import DenseSystemJacobians
 from newton._src.solvers.kamino._src.linalg import LLTBlockedRCMSolver, LLTBlockedSolver
+from newton._src.solvers.kamino._src.linalg.core import DenseMatrixLayout, dense_matrix_layout
 from newton._src.solvers.kamino._src.solvers.common import WarmStartMode
 from newton._src.solvers.kamino._src.solvers.dvi import DVISolver
 from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
@@ -31,7 +32,7 @@ from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     _initialize_dvi_status,
     _solve_bilateral_unilateral_response,
     _solve_bilateral_unilateral_response_cooperative,
-    _solve_dvi_inequalities_colored_pgs,
+    make_solve_dvi_inequalities_colored_pgs_kernel,
 )
 from newton._src.solvers.kamino._src.solvers.dvi.projections import (
     contact_friction_normal_load as _contact_friction_normal_load,
@@ -70,12 +71,13 @@ from newton._src.solvers.kamino._src.solvers.metrics import SolutionMetrics
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton.tests.kamino import expect_contact_capacity_warning, setup_tests, test_context
 from newton.tests.kamino.test_kamino_solvers_padmm import TestSetup
-from newton.tests.kamino.utils.extract import extract_delassus, extract_problem_vector
+from newton.tests.kamino.utils.extract import extract_delassus, extract_problem_vector, get_matrix_block
 from newton.tests.kamino.utils.make import (
     force_row_storage,
     make_containers,
     make_row_storage,
     make_test_problem_fourbar,
+    override_dense_matrix_config,
     update_containers,
 )
 from newton.tests.unittest_utils import MODULE_LOAD_OUTPUT_RE, NewtonTestCase
@@ -757,6 +759,7 @@ class TestDVISolver(NewtonTestCase):
         )
         self.assertIsNotNone(solver.data)
 
+    @override_dense_matrix_config(layout=DenseMatrixLayout.AUTO, row_alignment=1)
     def test_01b_dvi_row_storage_matches_flat_storage(self):
         """Match flat storage with per-world rows and mixed matrix layouts."""
 
@@ -1373,7 +1376,7 @@ class TestDVISolver(NewtonTestCase):
         max_alternating_iterations = 17
         inequality_sweeps_per_iteration = 3
         for sparse, inequality_kernel in (
-            (False, _solve_dvi_inequalities_colored_pgs),
+            (False, make_solve_dvi_inequalities_colored_pgs_kernel(len(dense_matrix_layout([1])[0]))),
             (True, _solve_dvi_sparse_contacts_pgs),
         ):
             with self.subTest(sparse=sparse):
@@ -1667,8 +1670,8 @@ class TestDVISolver(NewtonTestCase):
         self.assertLess(float(status["r_b"]), 1e-6)
 
         ncts = int(problem.data.dim.numpy()[0])
-        original = problem.data.D.numpy()[: ncts * ncts].reshape(ncts, ncts)
-        projected = solver.data.state.projected_D.numpy()[: ncts * ncts].reshape(ncts, ncts)
+        original = get_matrix_block(0, problem.data.D.numpy(), [ncts])
+        projected = get_matrix_block(0, solver.data.state.projected_D.numpy(), [ncts])
         self.assertGreater(float(np.max(np.abs(projected[njc:, njc:] - original[njc:, njc:]))), 1e-6)
 
     @unittest.skipUnless(wp.get_cuda_device_count(), "requires CUDA device")

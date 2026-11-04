@@ -78,7 +78,11 @@ class TestLinAlgLLTSequentialSolver(unittest.TestCase):
         logger.debug("X_np:\n%s\n", problem.X_np[0])
         logger.debug("y_np:\n%s\n", problem.y_np[0])
         logger.debug("x_np:\n%s\n", problem.x_np[0])
-        logger.debug("A_wp (%s):\n%s\n", problem.A_wp.shape, problem.A_wp.numpy().reshape((N, N)))
+        logger.debug(
+            "A_wp (%s):\n%s\n",
+            problem.A_wp.shape,
+            get_matrix_block(0, problem.A_wp.numpy(), problem.dims, problem.maxdims),
+        )
         logger.debug("b_wp (%s):\n%s\n", problem.b_wp.shape, problem.b_wp.numpy().reshape((N,)))
 
         # Create the linear operator meta-data
@@ -89,7 +93,11 @@ class TestLinAlgLLTSequentialSolver(unittest.TestCase):
         # Create the linear operator data structure
         operator = DenseLinearOperatorData(info=opinfo, mat=problem.A_wp)
         logger.debug("operator.info:\n%s\n", operator.info)
-        logger.debug("operator.mat (%s):\n%s\n", operator.mat.shape, operator.mat.numpy().reshape((N, N)))
+        logger.debug(
+            "operator.mat (%s):\n%s\n",
+            operator.mat.shape,
+            get_matrix_block(0, operator.mat.numpy(), problem.dims, problem.maxdims),
+        )
 
         # Create a SequentialCholeskyFactorizer instance
         llt = LLTSequentialSolver(operator=operator, device=self.default_device)
@@ -107,7 +115,9 @@ class TestLinAlgLLTSequentialSolver(unittest.TestCase):
 
         # Factorize the target square-symmetric matrix
         llt.compute(A=problem.A_wp)
-        logger.debug("llt.L (%s):\n%s\n", llt.L.shape, llt.L.numpy().reshape((N, N)))
+        logger.debug(
+            "llt.L (%s):\n%s\n", llt.L.shape, get_matrix_block(0, llt.L.numpy(), problem.dims, problem.maxdims)
+        )
 
         # Check matrix factorization against numpy
         L_wp_np = get_matrix_block(0, llt.L.numpy(), problem.dims, problem.maxdims)
@@ -196,7 +206,11 @@ class TestLinAlgLLTSequentialSolver(unittest.TestCase):
         logger.debug("X_np:\n%s\n", problem.X_np[0])
         logger.debug("y_np:\n%s\n", problem.y_np[0])
         logger.debug("x_np:\n%s\n", problem.x_np[0])
-        logger.debug("A_wp (%s):\n%s\n", problem.A_wp.shape, problem.A_wp.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "A_wp (%s):\n%s\n",
+            problem.A_wp.shape,
+            get_matrix_block(0, problem.A_wp.numpy(), problem.dims, problem.maxdims),
+        )
         logger.debug("b_wp (%s):\n%s\n", problem.b_wp.shape, problem.b_wp.numpy().reshape((N_max,)))
 
         # Create the linear operator meta-data
@@ -207,7 +221,11 @@ class TestLinAlgLLTSequentialSolver(unittest.TestCase):
         # Create the linear operator data structure
         operator = DenseLinearOperatorData(info=opinfo, mat=problem.A_wp)
         logger.debug("operator.info:\n%s\n", operator.info)
-        logger.debug("operator.mat (%s):\n%s\n", operator.mat.shape, operator.mat.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "operator.mat (%s):\n%s\n",
+            operator.mat.shape,
+            get_matrix_block(0, operator.mat.numpy(), problem.dims, problem.maxdims),
+        )
 
         # Create a SequentialCholeskyFactorizer instance
         llt = LLTSequentialSolver(operator=operator, device=self.default_device)
@@ -228,7 +246,9 @@ class TestLinAlgLLTSequentialSolver(unittest.TestCase):
 
         # Factorize the target square-symmetric matrix
         llt.compute(A=problem.A_wp)
-        logger.debug("llt.L (%s):\n%s\n", llt.L.shape, llt.L.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "llt.L (%s):\n%s\n", llt.L.shape, get_matrix_block(0, llt.L.numpy(), problem.dims, problem.maxdims)
+        )
 
         # Check matrix factorization against numpy
         L_wp_np = get_matrix_block(0, llt.L.numpy(), problem.dims, problem.maxdims)

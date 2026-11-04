@@ -12,6 +12,7 @@ import warp as wp
 from newton._src.solvers.kamino._src.linalg.core import (
     DenseRectangularMultiLinearInfo,
     DenseSquareMultiLinearInfo,
+    dense_matrix_layout,
     make_dtype_tolerance,
 )
 from newton._src.solvers.kamino._src.utils.logger import reset_log_level, set_log_level
@@ -196,12 +197,13 @@ class TestLinAlgCoreDenseMultiLinearRectangularInfo(unittest.TestCase):
         self.assertEqual(info.mio.shape, (len(dims),))
         self.assertEqual(info.rvio.shape, (len(dims),))
         self.assertEqual(info.ivio.shape, (len(dims),))
+        mat_offsets = dense_matrix_layout([m * n for m, n in dims])[1]
         for i, (m, n) in enumerate(dims):
             self.assertEqual(info.maxdim.numpy()[i][0], m)
             self.assertEqual(info.maxdim.numpy()[i][1], n)
             self.assertEqual(info.dim.numpy()[i][0], m)
             self.assertEqual(info.dim.numpy()[i][1], n)
-            self.assertEqual(info.mio.numpy()[i], sum(d[0] * d[1] for d in dims[:i]))
+            self.assertEqual(info.mio.numpy()[i], mat_offsets[i])
             self.assertEqual(info.rvio.numpy()[i], sum(d[0] for d in dims[:i]))
             self.assertEqual(info.ivio.numpy()[i], sum(d[1] for d in dims[:i]))
 
@@ -297,10 +299,11 @@ class TestLinAlgCoreDenseMultiLinearSquareInfo(unittest.TestCase):
         self.assertEqual(info.dim.shape, (len(dims),))
         self.assertEqual(info.mio.shape, (len(dims),))
         self.assertEqual(info.vio.shape, (len(dims),))
+        mat_offsets = dense_matrix_layout([n * n for n in dims])[1]
         for i, n in enumerate(dims):
             self.assertEqual(info.maxdim.numpy()[i], n)
             self.assertEqual(info.dim.numpy()[i], n)
-            self.assertEqual(info.mio.numpy()[i], sum(d * d for d in dims[:i]))
+            self.assertEqual(info.mio.numpy()[i], mat_offsets[i])
             self.assertEqual(info.vio.numpy()[i], sum(d for d in dims[:i]))
 
 

@@ -9,12 +9,17 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.kamino._src.linalg.core import DenseLinearOperatorData, DenseSquareMultiLinearInfo
+from newton._src.solvers.kamino._src.linalg.core import (
+    DenseLinearOperatorData,
+    DenseMatrixLayout,
+    DenseSquareMultiLinearInfo,
+)
 from newton._src.solvers.kamino._src.linalg.factorize import rcm_batch
 from newton._src.solvers.kamino._src.linalg.factorize.llt_blocked_rcm_solver import LLTBlockedRCMSolver
 from newton._src.solvers.kamino._src.utils.logger import reset_log_level, set_log_level
 from newton.tests.kamino import setup_tests, test_context
 from newton.tests.kamino.utils.extract import get_matrix_block, get_vector_block
+from newton.tests.kamino.utils.make import make_dense_matrix_storage, override_dense_matrix_config
 from newton.tests.kamino.utils.print import debug_print_error_stats
 from newton.tests.kamino.utils.rand import RandomProblemLLT
 
@@ -76,7 +81,9 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
             for rank in (1, 2):
                 with self.subTest(parallel=parallel, rank=rank):
                     info = DenseSquareMultiLinearInfo()
-                    info.finalize(dimensions=capacities, dtype=wp.float32, device=self.default_device)
+                    layout = DenseMatrixLayout.FLAT if rank == 1 else DenseMatrixLayout.ROWS
+                    with override_dense_matrix_config(layout=layout, row_alignment=1):
+                        info.finalize(dimensions=capacities, dtype=wp.float32, device=self.default_device)
                     info.dim.assign(np.asarray(active, dtype=np.int32))
                     matrix_offsets = info.mio.numpy()
                     vector_offsets = info.vio.numpy()
@@ -344,7 +351,9 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
                 info = DenseSquareMultiLinearInfo()
                 info.finalize(dimensions=[n] * batch_size, dtype=wp.float32, device=self.default_device)
                 matrix_wp = wp.array(
-                    np.tile(matrix.reshape(-1), batch_size), dtype=wp.float32, device=self.default_device
+                    make_dense_matrix_storage(info, [matrix] * batch_size),
+                    dtype=wp.float32,
+                    device=self.default_device,
                 )
                 rhs_wp = wp.array(np.tile(rhs, batch_size), dtype=wp.float32, device=self.default_device)
                 result_wp = wp.zeros(n * batch_size, dtype=wp.float32, device=self.default_device)
@@ -357,13 +366,15 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
                 )
 
                 for candidate in (matrix, np.eye(n, dtype=np.float32) * 2.0):
-                    matrix_wp.assign(np.tile(candidate.reshape(-1), batch_size))
+                    matrix_wp.assign(make_dense_matrix_storage(info, [candidate] * batch_size))
                     solver.compute(matrix_wp)
                     solver.solve(rhs_wp, result_wp)
                     expected = np.tile(np.linalg.solve(candidate, rhs), batch_size)
                     np.testing.assert_allclose(result_wp.numpy(), expected, rtol=1.0e-4, atol=1.0e-5)
                 # Disappearing panels must not retain values from the previous factor.
-                for factor in solver.L.numpy().reshape(batch_size, n, n):
+                factors = solver.L.numpy()
+                for block in range(batch_size):
+                    factor = get_matrix_block(block, factors, info.dimensions)
                     np.testing.assert_allclose(np.tril(factor), np.eye(n) * np.sqrt(2.0), rtol=1.0e-6, atol=0.0)
 
     def test_cached_permutation_on_cpu_fallback(self):
@@ -473,7 +484,11 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         logger.debug("X_np:\n%s\n", problem.X_np[0])
         logger.debug("y_np:\n%s\n", problem.y_np[0])
         logger.debug("x_np:\n%s\n", problem.x_np[0])
-        logger.debug("A_wp (%s):\n%s\n", problem.A_wp.shape, problem.A_wp.numpy().reshape((N, N)))
+        logger.debug(
+            "A_wp (%s):\n%s\n",
+            problem.A_wp.shape,
+            get_matrix_block(0, problem.A_wp.numpy(), problem.dims, problem.maxdims),
+        )
         logger.debug("b_wp (%s):\n%s\n", problem.b_wp.shape, problem.b_wp.numpy().reshape((N,)))
 
         # Create the linear operator meta-data
@@ -484,7 +499,11 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         # Create the linear operator data structure
         operator = DenseLinearOperatorData(info=opinfo, mat=problem.A_wp)
         logger.debug("operator.info:\n%s\n", operator.info)
-        logger.debug("operator.mat (%s):\n%s\n", operator.mat.shape, operator.mat.numpy().reshape((N, N)))
+        logger.debug(
+            "operator.mat (%s):\n%s\n",
+            operator.mat.shape,
+            get_matrix_block(0, operator.mat.numpy(), problem.dims, problem.maxdims),
+        )
 
         # Create a SequentialCholeskyFactorizer instance
         llt = LLTBlockedRCMSolver(operator=operator, device=self.default_device)
@@ -502,7 +521,9 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
 
         # Factorize the target square-symmetric matrix
         llt.compute(A=problem.A_wp)
-        logger.debug("llt.L (%s):\n%s\n", llt.L.shape, llt.L.numpy().reshape((N, N)))
+        logger.debug(
+            "llt.L (%s):\n%s\n", llt.L.shape, get_matrix_block(0, llt.L.numpy(), problem.dims, problem.maxdims)
+        )
 
         # Extract L, P from warp to numpy
         P_wp_np = get_vector_block(0, llt.P.numpy(), problem.dims, problem.maxdims)
@@ -583,7 +604,11 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         logger.debug("X_np:\n%s\n", problem.X_np[0])
         logger.debug("y_np:\n%s\n", problem.y_np[0])
         logger.debug("x_np:\n%s\n", problem.x_np[0])
-        logger.debug("A_wp (%s):\n%s\n", problem.A_wp.shape, problem.A_wp.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "A_wp (%s):\n%s\n",
+            problem.A_wp.shape,
+            get_matrix_block(0, problem.A_wp.numpy(), problem.dims, problem.maxdims),
+        )
         logger.debug("b_wp (%s):\n%s\n", problem.b_wp.shape, problem.b_wp.numpy().reshape((N_max,)))
 
         # Create the linear operator meta-data
@@ -594,7 +619,11 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
         # Create the linear operator data structure
         operator = DenseLinearOperatorData(info=opinfo, mat=problem.A_wp)
         logger.debug("operator.info:\n%s\n", operator.info)
-        logger.debug("operator.mat (%s):\n%s\n", operator.mat.shape, operator.mat.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "operator.mat (%s):\n%s\n",
+            operator.mat.shape,
+            get_matrix_block(0, operator.mat.numpy(), problem.dims, problem.maxdims),
+        )
 
         # Create a SequentialCholeskyFactorizer instance
         llt = LLTBlockedRCMSolver(operator=operator, device=self.default_device)
@@ -615,7 +644,9 @@ class TestLinAlgLLTBlockedRCMSolver(unittest.TestCase):
 
         # Factorize the target square-symmetric matrix
         llt.compute(A=problem.A_wp)
-        logger.debug("llt.L (%s):\n%s\n", llt.L.shape, llt.L.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "llt.L (%s):\n%s\n", llt.L.shape, get_matrix_block(0, llt.L.numpy(), problem.dims, problem.maxdims)
+        )
 
         # Extract L, P from warp to numpy
         P_wp_np = get_vector_block(0, llt.P.numpy(), problem.dims, problem.maxdims)

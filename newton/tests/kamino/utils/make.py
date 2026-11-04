@@ -50,11 +50,13 @@ logger = logging.getLogger(__name__)
 __all__ = [
     "force_row_storage",
     "make_containers",
+    "make_dense_matrix_storage",
     "make_generalized_mass_matrices",
     "make_inverse_generalized_mass_matrices",
     "make_row_storage",
     "make_test_problem",
     "make_test_problem_fourbar",
+    "override_dense_matrix_config",
     "update_containers",
 ]
 
@@ -69,6 +71,18 @@ wp.set_module_options({"enable_backward": False, "default_grid_stride": False})
 # Dense storage layouts.
 
 
+def make_dense_matrix_storage(
+    info: linalg_core.DenseSquareMultiLinearInfo, matrices: list[np.ndarray], fill_value: float = 0.0
+) -> np.ndarray:
+    """Store per-block matrices row-wise at their ``info.mio`` offsets, in the layout of ``info.matrix_shape``."""
+    storage = np.full(info.matrix_shape, fill_value, dtype=np.float32)
+    offsets = info.mio.numpy()
+    for block, matrix in enumerate(matrices):
+        row = storage[block] if storage.ndim == 2 else storage
+        row[offsets[block] : offsets[block] + matrix.size] = matrix.ravel()
+    return storage
+
+
 def make_row_storage(flat: np.ndarray, offsets: list[int] | np.ndarray, sizes: list[int] | np.ndarray) -> np.ndarray:
     """Copy flat per-block matrix data into one zero-padded row per block."""
     sizes = np.asarray(sizes, dtype=np.int64)
@@ -76,6 +90,20 @@ def make_row_storage(flat: np.ndarray, offsets: list[int] | np.ndarray, sizes: l
     for block, (offset, size) in enumerate(zip(offsets, sizes, strict=True)):
         rows[block, :size] = flat[offset : offset + size]
     return rows
+
+
+@contextlib.contextmanager
+def override_dense_matrix_config(**settings) -> Iterator[None]:
+    """Temporarily override fields of the global :class:`DenseMatrixConfig`."""
+    config = linalg_core.dense_matrix_config
+    original = {name: getattr(config, name) for name in settings}
+    for name, value in settings.items():
+        setattr(config, name, value)
+    try:
+        yield
+    finally:
+        for name, value in original.items():
+            setattr(config, name, value)
 
 
 @contextlib.contextmanager

@@ -22,7 +22,8 @@ from newton._src.solvers.kamino._src.solvers.dvi.kernels import (
     make_find_bilateral_factor_row_start_kernel,
     make_find_bilateral_factor_row_start_rcm_kernel,
 )
-from newton.tests.kamino.utils.make import make_row_storage
+from newton.tests.kamino.utils.extract import get_matrix_block
+from newton.tests.kamino.utils.make import make_dense_matrix_storage, make_row_storage
 
 
 class TestKaminoSymbolicFill(unittest.TestCase):
@@ -200,7 +201,7 @@ class TestKaminoFailedPivotRetry(unittest.TestCase):
                 with self.subTest(parallel=parallel, captured=captured):
                     info = DenseSquareMultiLinearInfo()
                     info.finalize(dimensions=[n, n], dtype=wp.float32, device=device)
-                    matrix = wp.array(np.concatenate([healthy.ravel(), failing.ravel()]), device=device)
+                    matrix = wp.array(make_dense_matrix_storage(info, [healthy, failing]), device=device)
                     solver = LLTBlockedRCMSolver(
                         operator=DenseLinearOperatorData(info=info, mat=matrix),
                         parallel_factorization=parallel,
@@ -214,13 +215,14 @@ class TestKaminoFailedPivotRetry(unittest.TestCase):
                         wp.capture_launch(capture.graph)
                     else:
                         solver.compute(matrix)
-                    factors = solver.L.numpy().reshape(2, n, n)
+                    factors = solver.L.numpy()
                     permutation = solver.P.numpy().reshape(2, n)
                     for block, (source, expected_shift) in enumerate(((healthy, 0.0), (failing, shift))):
                         order = permutation[block]
                         permuted = source[np.ix_(order, order)].astype(np.float64) + expected_shift * np.eye(n)
                         expected = np.linalg.cholesky(permuted)
-                        np.testing.assert_allclose(np.tril(factors[block]), expected, rtol=0.0, atol=2.0e-3)
+                        factor = get_matrix_block(block, factors, [n, n])
+                        np.testing.assert_allclose(np.tril(factor), expected, rtol=0.0, atol=2.0e-3)
 
     def test_blocked_llt_only_failed_blocks_are_shifted(self):
         """Refactor an indefinite LLTB block with a diagonal shift, leave healthy blocks untouched, and restore A."""
@@ -237,13 +239,13 @@ class TestKaminoFailedPivotRetry(unittest.TestCase):
             blocks.append((eigenvectors * eigenvalues @ eigenvectors.T).astype(np.float32))
         failing = (False, True, False, True)
         dims = [b.shape[0] for b in blocks]
-        source = np.concatenate([b.ravel() for b in blocks])
         device = wp.get_device()
         for block_size in (32, 64):
             for captured in (False, True) if device.is_cuda else (False,):
                 with self.subTest(block_size=block_size, captured=captured):
                     info = DenseSquareMultiLinearInfo()
                     info.finalize(dimensions=dims, dtype=wp.float32, device=device)
+                    source = make_dense_matrix_storage(info, blocks)
                     matrix = wp.array(source, dtype=wp.float32, device=device)
                     operator = DenseLinearOperatorData(info=info, mat=matrix)
                     plain = LLTBlockedSolver(operator=operator, factorize_block_size=block_size, device=device)
@@ -264,12 +266,10 @@ class TestKaminoFailedPivotRetry(unittest.TestCase):
 
                     # The shift is removed from the caller's matrix again.
                     np.testing.assert_allclose(matrix.numpy(), source, rtol=0.0, atol=1.0e-6)
-                    mio = info.mio.numpy()
                     for index, (A, fails) in enumerate(zip(blocks, failing, strict=True)):
                         n = A.shape[0]
-                        entries = slice(mio[index], mio[index] + n * n)
-                        L_plain = plain.L.numpy()[entries].reshape(n, n)
-                        L = solver.L.numpy()[entries].reshape(n, n)
+                        L_plain = get_matrix_block(index, plain.L.numpy(), dims)
+                        L = get_matrix_block(index, solver.L.numpy(), dims)
                         self.assertEqual(np.isfinite(np.diag(L_plain)).all(), not fails)
                         if not fails:
                             np.testing.assert_array_equal(L, L_plain)

@@ -9,7 +9,11 @@ import unittest
 import numpy as np
 import warp as wp
 
-from newton._src.solvers.kamino._src.linalg.core import DenseLinearOperatorData, DenseSquareMultiLinearInfo
+from newton._src.solvers.kamino._src.linalg.core import (
+    DenseLinearOperatorData,
+    DenseSquareMultiLinearInfo,
+    dense_matrix_layout,
+)
 from newton._src.solvers.kamino._src.linalg.factorize import (
     llt_blocked_factorize,
     llt_blocked_solve,
@@ -50,10 +54,11 @@ class TestLinAlgLLTBlocked(unittest.TestCase):
         # Set the tile block size for the blocked LLT kernels
         self.block_size = 16
 
-        # Pre-create kernels to avoid measuring compilation time during tests
-        self.factorize_kernel = make_llt_blocked_factorize_kernel(self.block_size)
-        self.solve_kernel = make_llt_blocked_solve_kernel(self.block_size)
-        self.solve_inplace_kernel = make_llt_blocked_solve_inplace_kernel(self.block_size)
+        # Pre-create kernels for the configured dense storage layout to avoid measuring compilation time during tests
+        array_ndim = len(dense_matrix_layout([1])[0])
+        self.factorize_kernel = make_llt_blocked_factorize_kernel(self.block_size, array_ndim)
+        self.solve_kernel = make_llt_blocked_solve_kernel(self.block_size, array_ndim)
+        self.solve_inplace_kernel = make_llt_blocked_solve_inplace_kernel(self.block_size, array_ndim)
 
     def tearDown(self):
         self.default_device = None
@@ -84,7 +89,11 @@ class TestLinAlgLLTBlocked(unittest.TestCase):
         logger.debug("X_np:\n%s\n", problem.X_np[0])
         logger.debug("y_np:\n%s\n", problem.y_np[0])
         logger.debug("x_np:\n%s\n", problem.x_np[0])
-        logger.debug("A_wp (%s):\n%s\n", problem.A_wp.shape, problem.A_wp.numpy().reshape((N, N)))
+        logger.debug(
+            "A_wp (%s):\n%s\n",
+            problem.A_wp.shape,
+            get_matrix_block(0, problem.A_wp.numpy(), problem.dims, problem.maxdims),
+        )
         logger.debug("b_wp (%s):\n%s\n", problem.b_wp.shape, problem.b_wp.numpy().reshape((N,)))
 
         # Create the linear operator meta-data
@@ -95,7 +104,11 @@ class TestLinAlgLLTBlocked(unittest.TestCase):
         # Create the linear operator data structure
         operator = DenseLinearOperatorData(info=opinfo, mat=problem.A_wp)
         logger.debug("operator.info:\n%s\n", operator.info)
-        logger.debug("operator.mat (%s):\n%s\n", operator.mat.shape, operator.mat.numpy().reshape((N, N)))
+        logger.debug(
+            "operator.mat (%s):\n%s\n",
+            operator.mat.shape,
+            get_matrix_block(0, operator.mat.numpy(), problem.dims, problem.maxdims),
+        )
 
         # Allocate LLT data arrays
         L_wp = wp.zeros_like(problem.A_wp, device=self.default_device)
@@ -221,7 +234,11 @@ class TestLinAlgLLTBlocked(unittest.TestCase):
         logger.debug("X_np:\n%s\n", problem.X_np[0])
         logger.debug("y_np:\n%s\n", problem.y_np[0])
         logger.debug("x_np:\n%s\n", problem.x_np[0])
-        logger.debug("A_wp (%s):\n%s\n", problem.A_wp.shape, problem.A_wp.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "A_wp (%s):\n%s\n",
+            problem.A_wp.shape,
+            get_matrix_block(0, problem.A_wp.numpy(), problem.dims, problem.maxdims),
+        )
         logger.debug("b_wp (%s):\n%s\n", problem.b_wp.shape, problem.b_wp.numpy().reshape((N_max,)))
 
         # Create the linear operator meta-data
@@ -232,7 +249,11 @@ class TestLinAlgLLTBlocked(unittest.TestCase):
         # Create the linear operator data structure
         operator = DenseLinearOperatorData(info=opinfo, mat=problem.A_wp)
         logger.debug("operator.info:\n%s\n", operator.info)
-        logger.debug("operator.mat (%s):\n%s\n", operator.mat.shape, operator.mat.numpy().reshape((N_max, N_max)))
+        logger.debug(
+            "operator.mat (%s):\n%s\n",
+            operator.mat.shape,
+            get_matrix_block(0, operator.mat.numpy(), problem.dims, problem.maxdims),
+        )
 
         # IMPORTANT: Now we set the active dimensions in the operator info
         operator.info.dim.fill_(N_act)
