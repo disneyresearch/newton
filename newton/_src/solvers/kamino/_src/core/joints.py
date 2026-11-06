@@ -1641,6 +1641,23 @@ class JointsModel:
     Shape of ``(sum_of_num_effort_cts,)``.
     """
 
+    dynamic_cts_friction_cts: wp.array[wp.int32] | None = None
+    """
+    Index of the Coulomb-friction constraint of the same DoF as each dynamic constraint row,
+    in model-wide flattened joint Coulomb-friction constraints arrays, or ``-1`` if the DoF
+    has none.
+
+    Shape of ``(sum_of_num_dynamic_joint_cts,)``.
+    """
+
+    dynamic_cts_effort_cts: wp.array[wp.int32] | None = None
+    """
+    Index of the effort-limit implicit-PD constraint of the same DoF as each dynamic constraint
+    row, in model-wide flattened joint effort constraints arrays, or ``-1`` if the DoF has none.
+
+    Shape of ``(sum_of_num_dynamic_joint_cts,)``.
+    """
+
     dynamic_cts_offset_total_cts: wp.array[wp.int32] | None = None
     """
     Index offset of each joint's dynamic constraints block, in model-wide

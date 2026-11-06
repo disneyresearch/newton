@@ -958,6 +958,41 @@ class TestModelConversions(unittest.TestCase):
                 else:
                     np.testing.assert_array_equal(kamino.joints.friction_cts_axis.numpy(), [])
 
+    def test_33_model_conversions_pair_dynamic_rows_with_friction_and_effort_rows(self):
+        """Pair each dynamic row with the model-wide friction and effort rows of the same DoF."""
+        builder = ModelBuilder()
+        SolverKamino.register_custom_attributes(builder)
+        cfg = ModelBuilder.JointDofConfig
+        for _ in range(2):
+            builder.begin_world()
+            body = builder.add_link(mass=1.0, inertia=wp.mat33f(np.eye(3, dtype=np.float32)))
+            joint = builder.add_joint_d6(
+                -1,
+                body,
+                angular_axes=[
+                    cfg(axis=newton.Axis.X, armature=1.0, friction=0.5),
+                    cfg(
+                        axis=newton.Axis.Y,
+                        armature=1.0,
+                        friction=0.5,
+                        effort_limit=1.0,
+                        target_ke=100.0,
+                        actuator_mode=newton.JointTargetMode.POSITION,
+                    ),
+                    cfg(axis=newton.Axis.Z, friction=0.5),
+                ],
+            )
+            builder.add_articulation([joint])
+            builder.end_world()
+
+        kamino = ModelKamino.from_newton(builder.finalize())
+
+        np.testing.assert_array_equal(kamino.joints.dynamic_cts_axis.numpy(), [0, 1, 0, 1])
+        np.testing.assert_array_equal(kamino.joints.friction_cts_axis.numpy(), [0, 1, 2, 0, 1, 2])
+        np.testing.assert_array_equal(kamino.joints.effort_cts_axis.numpy(), [1, 1])
+        np.testing.assert_array_equal(kamino.joints.dynamic_cts_friction_cts.numpy(), [0, 1, 3, 4])
+        np.testing.assert_array_equal(kamino.joints.dynamic_cts_effort_cts.numpy(), [-1, 0, -1, 1])
+
     def test_40_model_conversions_materials_dedup_from_shared_and_distinct_shape_properties(self):
         """
         Test that Newton->Kamino conversion deduplicates materials by

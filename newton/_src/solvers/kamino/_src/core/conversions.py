@@ -921,8 +921,10 @@ def pack_joint_constraint_axes_kernel(
     dynamic_cts_axis: wp.array[wp.int32],
     friction_cts_axis: wp.array[wp.int32],
     effort_cts_axis: wp.array[wp.int32],
+    dynamic_cts_friction_cts: wp.array[wp.int32],
+    dynamic_cts_effort_cts: wp.array[wp.int32],
 ):
-    """Pack ascending joint-local DoF axes for compact constraint rows."""
+    """Pack ascending joint-local DoF axes for compact constraint rows, and pair the rows of each DoF."""
     joint = wp.tid()
     dof_start = model_joint_qd_start[joint]
     dof_end = model_joint_qd_start[joint + 1]
@@ -951,15 +953,21 @@ def pack_joint_constraint_axes_kernel(
             model_joint_target_kd[dof],
             model_joint_effort_limit[dof],
         )
-        if dynamic and retain_dynamic:
-            dynamic_cts_axis[dynamic_row] = axis
-            dynamic_row += 1
+        friction_cts = wp.int32(-1)
+        effort_cts = wp.int32(-1)
         if friction and retain_friction:
             friction_cts_axis[friction_row] = axis
+            friction_cts = friction_row
             friction_row += 1
         if effort and retain_effort:
             effort_cts_axis[effort_row] = axis
+            effort_cts = effort_row
             effort_row += 1
+        if dynamic and retain_dynamic:
+            dynamic_cts_axis[dynamic_row] = axis
+            dynamic_cts_friction_cts[dynamic_row] = friction_cts
+            dynamic_cts_effort_cts[dynamic_row] = effort_cts
+            dynamic_row += 1
 
 
 @wp.kernel
@@ -2002,6 +2010,8 @@ def convert_joints(
         dynamic_cts_axis = wp.empty(shape=(model_size.sum_of_num_dynamic_joint_cts,), dtype=wp.int32)
         friction_cts_axis = wp.empty(shape=(model_size.sum_of_num_friction_joint_cts,), dtype=wp.int32)
         effort_cts_axis = wp.empty(shape=(model_size.sum_of_num_effort_joint_cts,), dtype=wp.int32)
+        dynamic_cts_friction_cts = wp.empty(shape=(model_size.sum_of_num_dynamic_joint_cts,), dtype=wp.int32)
+        dynamic_cts_effort_cts = wp.empty(shape=(model_size.sum_of_num_dynamic_joint_cts,), dtype=wp.int32)
 
     # Convert local (per-world) joint offsets to global by adding per-world prefix offsets in-place
     wp.launch(
@@ -2061,6 +2071,8 @@ def convert_joints(
             dynamic_cts_axis,
             friction_cts_axis,
             effort_cts_axis,
+            dynamic_cts_friction_cts,
+            dynamic_cts_effort_cts,
         ],
         device=model.device,
     )
@@ -2139,6 +2151,8 @@ def convert_joints(
         dynamic_cts_axis=dynamic_cts_axis,
         friction_cts_axis=friction_cts_axis,
         effort_cts_axis=effort_cts_axis,
+        dynamic_cts_friction_cts=dynamic_cts_friction_cts,
+        dynamic_cts_effort_cts=dynamic_cts_effort_cts,
     )
     return model_joints
 
