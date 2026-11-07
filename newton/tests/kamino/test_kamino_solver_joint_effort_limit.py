@@ -201,9 +201,15 @@ class TestSolverKaminoJointEffortLimitImplicitPd(unittest.TestCase):
                     ):
                         expected_effort = direction * effort_limit
                         expected_velocity = DT * expected_effort / (_EFFECTIVE_JOINT_INERTIA + armature)
+                        # PADMM decouples the effort row from the armature row of the same DoF, and
+                        # the body actuation wrench holds the part of the effort that acts on the
+                        # body directly, ``r / (d + r)`` with ``d = 1 / I`` and ``r = 1 / armature``.
+                        expected_body_effort = expected_effort
+                        if config_name in PADMM_CONFIG_NAMES and armature > 0.0:
+                            expected_body_effort *= (1.0 / armature) / (1.0 / _BODY_INERTIA + 1.0 / armature)
                         self.assertAlmostEqual(float(actual_efforts[world]), expected_effort, delta=3.0e-4)
                         self.assertAlmostEqual(float(reported_efforts[world]), expected_effort, delta=3.0e-4)
-                        self.assertAlmostEqual(float(body_efforts[world, 4]), expected_effort, delta=3.0e-4)
+                        self.assertAlmostEqual(float(body_efforts[world, 4]), expected_body_effort, delta=3.0e-4)
                         self.assertAlmostEqual(float(velocities[world]), expected_velocity, delta=3.0e-4)
 
     def test_schur_default_follows_bounded_pd(self):

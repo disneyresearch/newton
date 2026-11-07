@@ -56,6 +56,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
+import numpy as np
 import warp as wp
 
 from .....core.types import override
@@ -65,7 +66,12 @@ from ..core.math import FLOAT32_EPS, compute_gyroscopic_torque
 from ..core.model import ModelKamino
 from ..core.size import SizeKamino
 from ..core.types import vec6f
-from ..dynamics.delassus import BlockSparseMatrixFreeDelassusOperator, DelassusOperator
+from ..dynamics.delassus import (
+    BlockSparseMatrixFreeDelassusOperator,
+    DelassusOperator,
+    mixed_joint_body_scale,
+    mixed_joint_coupling,
+)
 from ..geometry.contacts import ContactsKamino
 from ..kinematics.jacobians import DenseSystemJacobians, SparseSystemJacobians
 from ..kinematics.limits import LimitsKamino
@@ -743,6 +749,250 @@ def _build_joint_effort_bias(
 
 
 @wp.kernel
+def _build_mixed_joint_dofs(
+    # Inputs:
+    model_joints_wid: wp.array[wp.int32],
+    model_joints_num_dynamic_cts: wp.array[wp.int32],
+    model_joints_dynamic_cts_offset: wp.array[wp.int32],
+    model_joints_friction_cts_offset: wp.array[wp.int32],
+    model_joints_effort_cts_offset: wp.array[wp.int32],
+    model_joints_dynamic_cts_offset_total_cts: wp.array[wp.int32],
+    model_joints_friction_cts_offset_total_cts: wp.array[wp.int32],
+    model_joints_effort_cts_offset_total_cts: wp.array[wp.int32],
+    model_joints_dynamic_cts_friction_cts: wp.array[wp.int32],
+    model_joints_dynamic_cts_effort_cts: wp.array[wp.int32],
+    # Outputs:
+    mixed_wid: wp.array[wp.int32],
+    mixed_dynamic_row: wp.array[wp.int32],
+    mixed_friction_row: wp.array[wp.int32],
+    mixed_effort_row: wp.array[wp.int32],
+):
+    """Write the world and constraint-vector rows of each joint dynamics DoF and its friction and effort rows."""
+    jid = wp.tid()
+    wid = model_joints_wid[jid]
+    dynamic_start = model_joints_dynamic_cts_offset[jid]
+    for j in range(model_joints_num_dynamic_cts[jid]):
+        dof = dynamic_start + j
+        mixed_wid[dof] = wid
+        mixed_dynamic_row[dof] = model_joints_dynamic_cts_offset_total_cts[jid] + j
+        friction_cts = model_joints_dynamic_cts_friction_cts[dof]
+        friction_row = wp.int32(-1)
+        if friction_cts >= 0:
+            friction_row = (
+                model_joints_friction_cts_offset_total_cts[jid] + friction_cts - model_joints_friction_cts_offset[jid]
+            )
+        effort_cts = model_joints_dynamic_cts_effort_cts[dof]
+        effort_row = wp.int32(-1)
+        if effort_cts >= 0:
+            effort_row = (
+                model_joints_effort_cts_offset_total_cts[jid] + effort_cts - model_joints_effort_cts_offset[jid]
+            )
+        mixed_friction_row[dof] = friction_row
+        mixed_effort_row[dof] = effort_row
+
+
+@wp.kernel
+def _compute_mixed_joint_coupling_dense(
+    # Inputs:
+    mixed_wid: wp.array[wp.int32],
+    mixed_dynamic_row: wp.array[wp.int32],
+    mixed_friction_row: wp.array[wp.int32],
+    mixed_effort_row: wp.array[wp.int32],
+    data_joints_inv_m_j: wp.array[wp.float32],
+    problem_dim: wp.array[wp.int32],
+    problem_mio: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    problem_D: wp.array[wp.float32],
+    # Outputs:
+    mixed_c: wp.array[wp.float32],
+    mixed_s: wp.array[wp.float32],
+    mixed_row_scale: wp.array[wp.float32],
+):
+    """Compute the change of variables of each joint dynamics DoF from the body-space Delassus matrix."""
+    dof = wp.tid()
+    friction_row = mixed_friction_row[dof]
+    effort_row = mixed_effort_row[dof]
+    if friction_row < 0 and effort_row < 0:
+        return
+    wid = mixed_wid[dof]
+    ncts = problem_dim[wid]
+    vio = problem_vio[wid]
+    # Both rows have the Jacobian of the DoF and the off-diagonal entry has no regularization,
+    # so it is the body-space term of the DoF
+    row = wp.where(friction_row >= 0, friction_row, effort_row)
+    d = problem_D[problem_mio[wid] + ncts * (mixed_dynamic_row[dof] - vio) + row - vio]
+    r = data_joints_inv_m_j[dof]
+    s = mixed_joint_body_scale(d, r)
+    mixed_c[dof] = mixed_joint_coupling(d, r)
+    mixed_s[dof] = s
+    if friction_row >= 0:
+        mixed_row_scale[friction_row] = s
+    if effort_row >= 0:
+        mixed_row_scale[effort_row] = s
+
+
+@wp.kernel
+def _set_mixed_joint_delassus_dense(
+    # Inputs:
+    mixed_wid: wp.array[wp.int32],
+    mixed_dynamic_row: wp.array[wp.int32],
+    mixed_friction_row: wp.array[wp.int32],
+    mixed_effort_row: wp.array[wp.int32],
+    mixed_c: wp.array[wp.float32],
+    mixed_s: wp.array[wp.float32],
+    data_joints_inv_m_j: wp.array[wp.float32],
+    data_joints_inv_m_a: wp.array[wp.float32],
+    model_joints_dynamic_cts_effort_cts: wp.array[wp.int32],
+    problem_dim: wp.array[wp.int32],
+    problem_mio: wp.array[wp.int32],
+    problem_vio: wp.array[wp.int32],
+    # Outputs:
+    problem_D: wp.array[wp.float32],
+):
+    """Add the joint-space terms of the friction and effort rows of each DoF to the row-scaled Delassus matrix."""
+    dof = wp.tid()
+    friction_row = mixed_friction_row[dof]
+    effort_row = mixed_effort_row[dof]
+    if friction_row < 0 and effort_row < 0:
+        return
+    wid = mixed_wid[dof]
+    ncts = problem_dim[wid]
+    mio = problem_mio[wid]
+    vio = problem_vio[wid]
+    row_dyn = mixed_dynamic_row[dof] - vio
+    row_f = friction_row - vio
+    row_e = effort_row - vio
+    c = mixed_c[dof]
+    # The joint-space compliance of both rows, and their coupling through the joint dynamics
+    compliance = c * c * data_joints_inv_m_j[dof]
+    # The change of variables decouples the rows, so set the cancelling terms to exact zeros
+    if friction_row >= 0:
+        problem_D[mio + ncts * row_f + row_f] += compliance
+        problem_D[mio + ncts * row_dyn + row_f] = 0.0
+        problem_D[mio + ncts * row_f + row_dyn] = 0.0
+    if effort_row >= 0:
+        # Undo the row scaling of the effort compliance, which the change of variables leaves unchanged
+        s = mixed_s[dof]
+        inv_m_a = data_joints_inv_m_a[model_joints_dynamic_cts_effort_cts[dof]]
+        problem_D[mio + ncts * row_e + row_e] += compliance + (1.0 - s * s) * inv_m_a
+        problem_D[mio + ncts * row_dyn + row_e] = 0.0
+        problem_D[mio + ncts * row_e + row_dyn] = 0.0
+        if friction_row >= 0:
+            problem_D[mio + ncts * row_f + row_e] += compliance
+            problem_D[mio + ncts * row_e + row_f] += compliance
+
+
+@wp.kernel
+def _build_free_velocity_mixed_joint_rows(
+    # Inputs:
+    mixed_dynamic_row: wp.array[wp.int32],
+    mixed_friction_row: wp.array[wp.int32],
+    mixed_effort_row: wp.array[wp.int32],
+    mixed_c: wp.array[wp.float32],
+    # Outputs:
+    problem_v_f: wp.array[wp.float32],
+):
+    """Apply the change of variables of each DoF to the free velocity of its friction and effort rows."""
+    dof = wp.tid()
+    shift = mixed_c[dof] * problem_v_f[mixed_dynamic_row[dof]]
+    friction_row = mixed_friction_row[dof]
+    if friction_row >= 0:
+        problem_v_f[friction_row] += shift
+    effort_row = mixed_effort_row[dof]
+    if effort_row >= 0:
+        problem_v_f[effort_row] += shift
+
+
+@wp.kernel
+def _transform_mixed_joint_solution(
+    # Inputs:
+    mixed_dynamic_row: wp.array[wp.int32],
+    mixed_friction_row: wp.array[wp.int32],
+    mixed_effort_row: wp.array[wp.int32],
+    mixed_c: wp.array[wp.float32],
+    sign: wp.float32,
+    # Outputs:
+    lambdas: wp.array[wp.float32],
+    v_plus: wp.array[wp.float32],
+):
+    """Map the rows of each DoF to (``sign=1``) or from (``sign=-1``) decoupled variables."""
+    dof = wp.tid()
+    row_dyn = mixed_dynamic_row[dof]
+    c = sign * mixed_c[dof]
+    v_shift = c * v_plus[row_dyn]
+    # Friction and effort rows of the same DoF shift the same joint dynamics impulse
+    lambda_sum = wp.float32(0.0)
+    friction_row = mixed_friction_row[dof]
+    if friction_row >= 0:
+        lambda_sum += lambdas[friction_row]
+        v_plus[friction_row] += v_shift
+    effort_row = mixed_effort_row[dof]
+    if effort_row >= 0:
+        lambda_sum += lambdas[effort_row]
+        v_plus[effort_row] += v_shift
+    lambdas[row_dyn] -= c * lambda_sum
+
+
+@wp.func
+def _transform_mixed_joint_warmstart_row(
+    row: wp.int32,
+    row_dyn: wp.int32,
+    c: wp.float32,
+    problem_P: wp.array[wp.float32],
+    x: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    z: wp.array[wp.float32],
+):
+    """Map the preconditioned warm-start iterates of one friction or effort row, if any, to decoupled variables."""
+    if row < 0:
+        return
+    ratio = c * problem_P[row] / problem_P[row_dyn]
+    x[row_dyn] -= ratio * x[row]
+    y[row_dyn] -= ratio * y[row]
+    z[row] += ratio * z[row_dyn]
+
+
+@wp.kernel
+def _transform_mixed_joint_warmstart(
+    # Inputs:
+    mixed_dynamic_row: wp.array[wp.int32],
+    mixed_friction_row: wp.array[wp.int32],
+    mixed_effort_row: wp.array[wp.int32],
+    mixed_c: wp.array[wp.float32],
+    problem_P: wp.array[wp.float32],
+    # Outputs:
+    x: wp.array[wp.float32],
+    y: wp.array[wp.float32],
+    z: wp.array[wp.float32],
+):
+    """Map the preconditioned warm-start iterates of the rows of each DoF to decoupled variables."""
+    dof = wp.tid()
+    row_dyn = mixed_dynamic_row[dof]
+    c = mixed_c[dof]
+    _transform_mixed_joint_warmstart_row(mixed_friction_row[dof], row_dyn, c, problem_P, x, y, z)
+    _transform_mixed_joint_warmstart_row(mixed_effort_row[dof], row_dyn, c, problem_P, x, y, z)
+
+
+@wp.kernel
+def _scale_mixed_joint_impulses(
+    # Inputs:
+    mixed_friction_row: wp.array[wp.int32],
+    mixed_effort_row: wp.array[wp.int32],
+    mixed_s: wp.array[wp.float32],
+    # Outputs:
+    lambdas: wp.array[wp.float32],
+):
+    """Scale the friction and effort impulses of each DoF to the part that acts on the bodies directly."""
+    dof = wp.tid()
+    friction_row = mixed_friction_row[dof]
+    if friction_row >= 0:
+        lambdas[friction_row] *= mixed_s[dof]
+    effort_row = mixed_effort_row[dof]
+    if effort_row >= 0:
+        lambdas[effort_row] *= mixed_s[dof]
+
+
+@wp.kernel
 def _build_free_velocity_bias_limits(
     # Inputs:
     model_time_inv_dt: wp.array[wp.float32],
@@ -1336,6 +1586,7 @@ class DualProblem:
         config: list[DualProblem.Config] | DualProblem.Config | None = None,
         compute_h: bool = False,
         sparse: bool = True,
+        decouple_joint_dynamics: bool = False,
     ):
         """
         Constructs a dual problem interface container.
@@ -1357,6 +1608,14 @@ class DualProblem:
                 Defaults to `None`, indicating that default config will be used for all worlds.
             compute_h: Set to `True` to enable the computation of the nonlinear
                 generalized forces vectors in construction of the dual problem.
+                Defaults to `False`.
+            sparse: Set to `True` to use the matrix-free sparse Delassus operator.
+            decouple_joint_dynamics: Set to `True` to decouple the Coulomb friction and effort-limit
+                rows of each joint DoF that also has a joint dynamics row (armature, damping, or
+                implicit PD) from that row by a change of variables, see
+                :meth:`expand_decoupled_joint_solution`. The solution is the same, but no longer
+                suffers from poor accuracy for armature-dominant or PD-dominant joints.
+                The solver must map its solution with :meth:`expand_decoupled_joint_solution`.
                 Defaults to `False`.
         """
         # Ensure Jacobians are given if model is provided.
@@ -1380,6 +1639,38 @@ class DualProblem:
 
         self._sparse: bool = sparse
         """Flag to indicate whether the dual uses a sparse data representation."""
+
+        self._decouple_joint_dynamics: bool = decouple_joint_dynamics
+        """Flag to indicate whether joint friction and effort rows are decoupled from joint dynamics rows."""
+
+        self._num_mixed_joint_rows: int = 0
+        """Number of joint friction and effort rows that share their DoF with a joint dynamics row."""
+
+        # The arrays below are indexed by joint dynamics DoF, i.e. like the joint dynamics arrays (e.g. ``inv_m_j``)
+
+        self._mixed_wid: wp.array[wp.int32] | None = None
+        """World index of each joint dynamics DoF."""
+
+        self._mixed_dynamic_row: wp.array[wp.int32] | None = None
+        """Constraint-vector index of the joint dynamics row of each DoF."""
+
+        self._mixed_friction_row: wp.array[wp.int32] | None = None
+        """Constraint-vector index of the Coulomb friction row of each DoF, or ``-1``."""
+
+        self._mixed_effort_row: wp.array[wp.int32] | None = None
+        """Constraint-vector index of the effort row of each DoF, or ``-1``."""
+
+        self._mixed_effort_cts: wp.array[wp.int32] | None = None
+        """Index into the joint effort arrays (e.g. ``inv_m_a``) of the effort row of each DoF, or ``-1``."""
+
+        self._mixed_c: wp.array[wp.float32] | None = None
+        """Change-of-variables coefficient ``c`` of each DoF, updated on each build."""
+
+        self._mixed_s: wp.array[wp.float32] | None = None
+        """Body-space scale ``1 + c`` of each DoF, computed without cancellation."""
+
+        self._mixed_row_scale: wp.array[wp.float32] | None = None
+        """Dense-only row scale ``1 + c`` of the decoupled friction and effort rows, and one for all other rows."""
 
         # Finalize the dual problem data if a model is provided
         if model is not None:
@@ -1453,6 +1744,13 @@ class DualProblem:
         Returns whether the dual problem is using sparse operators.
         """
         return self._sparse
+
+    @property
+    def num_mixed_joint_rows(self) -> int:
+        """
+        Returns the number of joint friction and effort rows decoupled from joint dynamics rows.
+        """
+        return self._num_mixed_joint_rows
 
     ###
     # Operations
@@ -1639,6 +1937,10 @@ class DualProblem:
         if any(c.constraints.contact_compliance for c in self._config):
             self._data.v_b_friction = wp.zeros_like(self._data.v_b)
 
+        # Pair the joint friction and effort rows with the joint dynamics rows of the same DoFs
+        if self._decouple_joint_dynamics:
+            self._finalize_decoupled_joint_rows(model)
+
     def zero(self):
         if self._compute_h:
             self._data.h.zero_()
@@ -1749,6 +2051,10 @@ class DualProblem:
                 device=self.device,
             )
 
+        # Decouple the paired joint friction and effort rows from the joint dynamics rows
+        if self._num_mixed_joint_rows > 0:
+            self._build_mixed_joint_rows(data)
+
         # Optionally build and apply the Delassus diagonal preconditioner
         if any(s.dynamics.preconditioning for s in self._config):
             self._build_dual_preconditioner()
@@ -1771,6 +2077,112 @@ class DualProblem:
                     ],
                     device=self.device,
                 )
+
+    def reduce_decoupled_joint_solution(self, lambdas: wp.array[wp.float32], v_plus: wp.array[wp.float32]):
+        """
+        Maps a solution in the body-space rows of the joints to the rows solved by this problem.
+
+        This is the inverse of :meth:`expand_decoupled_joint_solution`, and does nothing unless
+        joint friction or effort rows are decoupled from the joint dynamics.
+
+        Args:
+            lambdas: Constraint impulses, modified in place.
+            v_plus: Post-event constraint-space velocities, modified in place.
+        """
+        self._transform_mixed_joint_solution(lambdas, v_plus, 1.0)
+
+    def expand_decoupled_joint_solution(self, lambdas: wp.array[wp.float32], v_plus: wp.array[wp.float32]):
+        """
+        Maps a solution of this problem back to the body-space rows of the joints.
+
+        When joint friction and effort rows are decoupled from the joint dynamics, the friction
+        row ``f`` and effort row ``e`` that share their DoF and Jacobian ``J`` with a joint
+        dynamics row ``a`` are solved in the variables
+        ``lambda_a' = lambda_a - c * (lambda_f + lambda_e)``, ``lambda_f' = lambda_f`` and
+        ``lambda_e' = lambda_e``, with a single coefficient per DoF
+
+        ```
+        d = J M^-1 J^T,   r = inv_m_j,   c = -d / (d + r).
+        ```
+
+        This choice makes the off-diagonal Delassus entries between the joint dynamics row and
+        the other rows vanish. The friction and effort rows then act on the bodies with the scaled
+        Jacobian ``(1 + c) J`` and on the joint dynamics with the compliance ``c^2 r``, so their
+        body and joint terms sum to ``d r / (d + r)``, i.e. the inverse of the combined body and
+        joint inertia of the DoF. The effort row keeps its compliance ``inv_m_a`` on top, and
+        both rows couple with ``d r / (d + r)``.
+
+        In the original rows, the joint dynamics impulse nearly cancels the friction and effort
+        impulses when the joint inertia ``1 / r`` is much larger than the body inertia ``1 / d``:
+        the body velocity change then requires a relative accuracy of ``r / d`` in each impulse,
+        and the problem is nearly singular. In the decoupled rows it is not, while ``c`` tends to
+        zero, and the rows to the original ones, when the body inertia dominates.
+
+        This does nothing unless joint friction or effort rows are decoupled from the joint
+        dynamics.
+
+        Args:
+            lambdas: Constraint impulses, modified in place.
+            v_plus: Post-event constraint-space velocities, modified in place.
+        """
+        self._transform_mixed_joint_solution(lambdas, v_plus, -1.0)
+
+    def reduce_decoupled_joint_warmstart(
+        self, x: wp.array[wp.float32], y: wp.array[wp.float32], z: wp.array[wp.float32]
+    ):
+        """
+        Maps preconditioned warm-start iterates in the body-space rows of the joints to the rows
+        solved by this problem (see :meth:`expand_decoupled_joint_solution`).
+
+        Args:
+            x: Preconditioned primal iterate, modified in place.
+            y: Preconditioned slack iterate, modified in place.
+            z: Preconditioned dual (velocity) iterate, modified in place.
+        """
+        if self._num_mixed_joint_rows == 0:
+            return
+        wp.launch(
+            _transform_mixed_joint_warmstart,
+            dim=self._mixed_c.shape[0],
+            inputs=[
+                # Inputs:
+                self._mixed_dynamic_row,
+                self._mixed_friction_row,
+                self._mixed_effort_row,
+                self._mixed_c,
+                self._data.P,
+                # Outputs:
+                x,
+                y,
+                z,
+            ],
+            device=self.device,
+        )
+
+    def compute_mixed_joint_body_impulses(self, lambdas: wp.array[wp.float32], body_lambdas: wp.array[wp.float32]):
+        """
+        Computes impulses of a solution of this problem that act on the bodies through the
+        constraint Jacobians.
+
+        Each decoupled friction and effort row acts on the bodies with the Jacobian ``(1 + c) J`` (see
+        :meth:`expand_decoupled_joint_solution`).
+        Body wrenches computed from these impulses avoid summing the nearly cancelling impulses
+        of the original rows.
+
+        Args:
+            lambdas: Constraint impulses of a solution of this problem.
+            body_lambdas: Output impulses to apply with the constraint Jacobians.
+        """
+        wp.copy(body_lambdas, lambdas)
+        if self._num_mixed_joint_rows == 0:
+            return
+        wp.launch(
+            _scale_mixed_joint_impulses,
+            dim=self._mixed_c.shape[0],
+            inputs=[self._mixed_friction_row, self._mixed_effort_row, self._mixed_s],
+            outputs=[body_lambdas],
+            device=self.device,
+        )
 
     ###
     # Internals
@@ -1802,6 +2214,171 @@ class DualProblem:
             return config
         else:
             raise TypeError(f"Expected List[DualProblem.Config] or DualProblem.Config, got {type(config)}")
+
+    def _finalize_decoupled_joint_rows(self, model: ModelKamino):
+        """
+        Writes the rows of each joint dynamics DoF and its Coulomb friction and effort rows, if any.
+        """
+        size = model.size
+        joints = model.joints
+        if size.sum_of_num_dynamic_joint_cts == 0:
+            return
+        self._num_mixed_joint_rows = int(np.count_nonzero(joints.dynamic_cts_friction_cts.numpy() >= 0)) + int(
+            np.count_nonzero(joints.dynamic_cts_effort_cts.numpy() >= 0)
+        )
+        if self._num_mixed_joint_rows == 0:
+            return
+        num_dofs = size.sum_of_num_dynamic_joint_cts
+        with wp.ScopedDevice(self._device):
+            self._mixed_wid = wp.empty(num_dofs, dtype=wp.int32)
+            self._mixed_dynamic_row = wp.empty(num_dofs, dtype=wp.int32)
+            self._mixed_friction_row = wp.empty(num_dofs, dtype=wp.int32)
+            self._mixed_effort_row = wp.empty(num_dofs, dtype=wp.int32)
+            self._mixed_c = wp.zeros(num_dofs, dtype=wp.float32)
+            self._mixed_s = wp.zeros(num_dofs, dtype=wp.float32)
+            if not self._sparse:
+                self._mixed_row_scale = wp.ones(size.sum_of_max_total_cts, dtype=wp.float32)
+        self._mixed_effort_cts = joints.dynamic_cts_effort_cts
+        wp.launch(
+            _build_mixed_joint_dofs,
+            dim=size.sum_of_num_joints,
+            inputs=[
+                # Inputs:
+                joints.wid,
+                joints.num_dynamic_cts,
+                joints.dynamic_cts_offset,
+                joints.friction_cts_offset,
+                joints.effort_cts_offset,
+                joints.dynamic_cts_offset_total_cts,
+                joints.friction_cts_offset_total_cts,
+                joints.effort_cts_offset_total_cts,
+                joints.dynamic_cts_friction_cts,
+                joints.dynamic_cts_effort_cts,
+                # Outputs:
+                self._mixed_wid,
+                self._mixed_dynamic_row,
+                self._mixed_friction_row,
+                self._mixed_effort_row,
+            ],
+            device=self.device,
+        )
+        if self._sparse:
+            self._delassus.set_mixed_joint_rows(
+                self._mixed_wid,
+                self._mixed_dynamic_row,
+                self._mixed_friction_row,
+                self._mixed_effort_row,
+                self._mixed_c,
+                self._mixed_s,
+            )
+
+    def _build_mixed_joint_rows(self, data: DataKamino):
+        """
+        Decouples the joint friction and effort rows from the joint dynamics rows of the same DoFs.
+
+        See :meth:`expand_decoupled_joint_solution` for the change of variables. This relies on
+        the friction and effort rows having the same Jacobian as the joint dynamics row of
+        their DoF, which holds since all are built from the same DoF. The sparse Delassus
+        operator applies the change of variables to its matrix-free products itself.
+        """
+        num_dofs = self._mixed_c.shape[0]
+        if self._sparse:
+            self._delassus.update_mixed_joint_coupling()
+        else:
+            wp.launch(
+                _compute_mixed_joint_coupling_dense,
+                dim=num_dofs,
+                inputs=[
+                    # Inputs:
+                    self._mixed_wid,
+                    self._mixed_dynamic_row,
+                    self._mixed_friction_row,
+                    self._mixed_effort_row,
+                    data.joints.inv_m_j,
+                    self._data.dim,
+                    self._data.mio,
+                    self._data.vio,
+                    self._data.D,
+                    # Outputs:
+                    self._mixed_c,
+                    self._mixed_s,
+                    self._mixed_row_scale,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _apply_dual_preconditioner_to_matrix,
+                dim=(self._size.num_worlds, self.delassus._max_of_max_total_D_size),
+                inputs=[
+                    # Inputs:
+                    self._data.dim,
+                    self._data.mio,
+                    self._data.vio,
+                    self._mixed_row_scale,
+                    # Outputs:
+                    self._data.D,
+                ],
+                device=self.device,
+            )
+            wp.launch(
+                _set_mixed_joint_delassus_dense,
+                dim=num_dofs,
+                inputs=[
+                    # Inputs:
+                    self._mixed_wid,
+                    self._mixed_dynamic_row,
+                    self._mixed_friction_row,
+                    self._mixed_effort_row,
+                    self._mixed_c,
+                    self._mixed_s,
+                    data.joints.inv_m_j,
+                    data.joints.inv_m_a,
+                    self._mixed_effort_cts,
+                    self._data.dim,
+                    self._data.mio,
+                    self._data.vio,
+                    # Outputs:
+                    self._data.D,
+                ],
+                device=self.device,
+            )
+        wp.launch(
+            _build_free_velocity_mixed_joint_rows,
+            dim=num_dofs,
+            inputs=[
+                # Inputs:
+                self._mixed_dynamic_row,
+                self._mixed_friction_row,
+                self._mixed_effort_row,
+                self._mixed_c,
+                # Outputs:
+                self._data.v_f,
+            ],
+            device=self.device,
+        )
+
+    def _transform_mixed_joint_solution(self, lambdas: wp.array[wp.float32], v_plus: wp.array[wp.float32], sign: float):
+        """
+        Maps a solution between the body-space rows of the joints and the rows solved by this problem.
+        """
+        if self._num_mixed_joint_rows == 0:
+            return
+        wp.launch(
+            _transform_mixed_joint_solution,
+            dim=self._mixed_c.shape[0],
+            inputs=[
+                # Inputs:
+                self._mixed_dynamic_row,
+                self._mixed_friction_row,
+                self._mixed_effort_row,
+                self._mixed_c,
+                wp.float32(sign),
+                # Outputs:
+                lambdas,
+                v_plus,
+            ],
+            device=self.device,
+        )
 
     def _build_nonlinear_generalized_force(model: ModelKamino, data: DataKamino, problem: DualProblemData):
         """
