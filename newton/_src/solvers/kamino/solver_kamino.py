@@ -1546,6 +1546,15 @@ class SolverKamino(SolverBase, CouplingInterface):
                 default=0.0,
             )
         )
+        builder.add_custom_attribute(
+            ModelBuilder.CustomAttribute(
+                name="joint_friction_load",
+                assignment=Model.AttributeAssignment.MODEL,
+                frequency=Model.AttributeFrequency.JOINT_DOF,
+                dtype=wp.float32,
+                default=0.0,
+            )
+        )
         # Register FK custom actuation types
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(
