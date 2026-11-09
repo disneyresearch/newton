@@ -1603,6 +1603,24 @@ def _warn_ignored_free_joint_friction(
         logger.warning("Ignoring joint friction on FREE joint %d (%r).", jid, model.joint_label[jid])
 
 
+def _validate_joint_friction_load(model: Model | ModelView, joint_dof_type: wp.array[wp.int32]) -> None:
+    """Raises if a DoF sets load-dependent friction outside a revolute joint with a friction constraint."""
+    if not hasattr(model, "joint_friction_load") or model.joint_count == 0:
+        return
+    loaded = np.flatnonzero(model.joint_friction_load.numpy() > 0.0)
+    if loaded.size == 0:
+        return
+    joint_of_dof = np.searchsorted(model.joint_qd_start.numpy(), loaded, side="right") - 1
+    revolute = joint_dof_type.numpy()[joint_of_dof] == JointDoFType.REVOLUTE
+    invalid = ~revolute | (model.joint_friction.numpy()[loaded] <= 0.0)
+    if np.any(invalid):
+        jid = int(joint_of_dof[np.flatnonzero(invalid)[0]])
+        raise ValueError(
+            f"Joint {jid} ({model.joint_label[jid]!r}) sets joint_friction_load; only revolute joints with "
+            "joint_friction > 0 have the friction constraint it bounds."
+        )
+
+
 def _validate_model_joint_pd_gains(model: Model | ModelView) -> None:
     """Raises if a Newton joint's selected implicit-PD mode has no effective gain."""
     target_mode = model.joint_target_mode.numpy()
@@ -1708,6 +1726,7 @@ def convert_joints(
     )
 
     _warn_ignored_free_joint_friction(model, joint_dof_type)
+    _validate_joint_friction_load(model, joint_dof_type)
 
     axis_validation_violations = wp.empty(len(StructuralUpdateViolation), dtype=wp.int32, device=model.device)
     _validate_joint_axes(model, joint_dof_type, axis_validation_violations)
@@ -2119,6 +2138,9 @@ def convert_joints(
         a_j=model.joint_armature,
         b_j=model.joint_damping,
         f_j=model.joint_friction,
+        f_load_j=(
+            model.joint_friction_load if hasattr(model, "joint_friction_load") else wp.zeros_like(model.joint_friction)
+        ),
         k_p_j=model.joint_target_ke,
         k_d_j=model.joint_target_kd,
         q_j_0=model.joint_q,

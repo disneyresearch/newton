@@ -61,6 +61,7 @@ import warp as wp
 from .....core.types import override
 from ...config import ConfigBase, ConstrainedDynamicsConfig, ConstraintStabilizationConfig
 from ..core.data import DataKamino
+from ..core.joints import JointDoFType
 from ..core.math import FLOAT32_EPS, compute_gyroscopic_torque
 from ..core.model import ModelKamino
 from ..core.size import SizeKamino
@@ -677,11 +678,19 @@ def _build_joint_friction_bounds(
     model_info_joint_friction_cts_offset: wp.array[wp.int32],
     model_info_joint_bounded_cts_offset: wp.array[wp.int32],
     model_joints_f_j: wp.array[wp.float32],
+    model_joints_f_load_j: wp.array[wp.float32],
+    model_joints_dof_type: wp.array[wp.int32],
+    model_joints_kinematic_cts_offset: wp.array[wp.int32],
+    data_joints_lambda_kin_j: wp.array[wp.float32],
     # Outputs:
     problem_bound_lower: wp.array[wp.float32],
     problem_bound_upper: wp.array[wp.float32],
 ):
-    """Build per-row Coulomb joint friction impulse bounds."""
+    """Build per-row Coulomb joint friction impulse bounds.
+
+    A revolute joint's bound adds its load-dependent friction times the radial force of the step
+    before: its kinematic constraint forces along the two axes normal to the rotation axis.
+    """
     jid = wp.tid()
     wid = model_joints_wid[jid]
     num_rows = model_joints_num_friction_cts[jid]
@@ -692,7 +701,13 @@ def _build_joint_friction_bounds(
     dt = model_time_dt[wid]
     for j in range(num_rows):
         axis = model_joints_friction_cts_axis[friction_start + j]
-        bound = dt * model_joints_f_j[dof_start + axis]
+        friction = model_joints_f_j[dof_start + axis]
+        if model_joints_dof_type[jid] == JointDoFType.REVOLUTE:
+            kin = model_joints_kinematic_cts_offset[jid]
+            radial_y = data_joints_lambda_kin_j[kin + 1]
+            radial_z = data_joints_lambda_kin_j[kin + 2]
+            friction += model_joints_f_load_j[dof_start + axis] * wp.sqrt(radial_y * radial_y + radial_z * radial_z)
+        bound = dt * friction
         problem_bound_lower[row_start + j] = -bound
         problem_bound_upper[row_start + j] = bound
 
@@ -1939,6 +1954,10 @@ class DualProblem:
                         model.info.joint_friction_cts_offset,
                         model.info.joint_bounded_cts_offset,
                         model.joints.f_j,
+                        model.joints.f_load_j,
+                        model.joints.dof_type,
+                        model.joints.kinematic_cts_offset,
+                        data.joints.lambda_kin_j,
                         # Outputs:
                         self._data.bound_lower,
                         self._data.bound_upper,

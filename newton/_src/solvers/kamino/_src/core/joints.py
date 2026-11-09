@@ -1382,6 +1382,13 @@ class JointsModel:
     Shape of ``(sum_of_num_joint_dofs,)``.
     """
 
+    f_load_j: wp.array[wp.float32] | None = None
+    """
+    Load-dependent Coulomb friction per joint DoF [m], i.e. friction torque per unit radial force
+    (e.g. ``mu * r`` for a pin in a bushing). Added to ``f_j`` using the previous step's radial force.
+    Only revolute DoFs with ``f_j > 0`` may set it. Shape: ``(sum_of_num_joint_dofs,)``.
+    """
+
     k_p_j: wp.array[wp.float32] | None = None
     """
     Implicit PD-control proportional gain of each joint (as flat array).

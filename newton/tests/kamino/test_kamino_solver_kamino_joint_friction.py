@@ -683,6 +683,65 @@ class TestSolverKaminoJointFrictionDominantArmature(unittest.TestCase):
                     np.testing.assert_allclose(velocities[stop_steps + 1 :], 0.0, atol=1.0e-2 * decrement)
 
 
+def _build_loaded_pin(friction: float, friction_load: float) -> newton.Model:
+    """A body hanging under gravity on a horizontal revolute joint through its CoM: its weight loads the pin
+    radially and exerts no torque about the axis."""
+    builder = newton.ModelBuilder()
+    SolverKamino.register_custom_attributes(builder)
+    builder.begin_world()
+    body = builder.add_link(
+        mass=_BODY_MASS,
+        inertia=[
+            _BODY_PRINCIPAL_INERTIA,
+            0.0,
+            0.0,
+            0.0,
+            _BODY_PRINCIPAL_INERTIA,
+            0.0,
+            0.0,
+            0.0,
+            _BODY_PRINCIPAL_INERTIA,
+        ],
+        lock_inertia=True,
+    )
+    joint = builder.add_joint_revolute(-1, body, axis=newton.Axis.Y, friction=friction)
+    builder.add_articulation([joint])
+    builder.end_world()
+    model = builder.finalize()
+    model.joint_friction_load.assign([friction_load])
+    return model
+
+
+class TestSolverKaminoJointFrictionLoad(unittest.TestCase):
+    def setUp(self):
+        """Initialize the shared public Kamino test context."""
+        if not test_context.setup_done:
+            setup_tests(clear_cache=False)
+
+    def test_radial_load_raises_the_friction_bound(self):
+        """A revolute joint's friction bound is joint_friction plus joint_friction_load times its radial force."""
+        friction, friction_load = 0.1, 0.1
+        bound = friction + friction_load * _BODY_MASS * 9.81
+        model = _build_loaded_pin(friction, friction_load)
+        solver = SolverKamino(model, make_padmm_dense_config())
+        state = _initialize_state(model)
+        # The bound of a step uses the radial force of the step before, which the first step solves.
+        state, *_ = _rollout(solver, model, state, steps=5, dt=DT, joint_force=0.0)
+        held_torque = 0.5 * (friction + bound)
+        state, _, velocities, friction_torques = _rollout(solver, model, state, steps=5, dt=DT, joint_force=held_torque)
+        np.testing.assert_allclose(velocities, 0.0, atol=1.0e-6)
+        self.assertAlmostEqual(friction_torques[-1, 0], -held_torque, delta=1.0e-3)
+        _, _, velocities, friction_torques = _rollout(solver, model, state, steps=5, dt=DT, joint_force=bound + 1.0)
+        self.assertTrue(np.all(velocities > 0.0))
+        np.testing.assert_allclose(friction_torques[:, 0], -bound, atol=1.0e-2, rtol=0.0)
+
+    def test_friction_load_needs_a_friction_constraint(self):
+        """Load-dependent friction on a joint without joint_friction is refused when the solver is built."""
+        model = _build_loaded_pin(0.0, 0.1)
+        with self.assertRaisesRegex(ValueError, "joint_friction_load"):
+            SolverKamino(model, make_padmm_dense_config())
+
+
 if __name__ == "__main__":
     setup_tests()
     unittest.main(verbosity=2)
