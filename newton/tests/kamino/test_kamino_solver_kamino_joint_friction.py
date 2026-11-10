@@ -683,7 +683,7 @@ class TestSolverKaminoJointFrictionDominantArmature(unittest.TestCase):
                     np.testing.assert_allclose(velocities[stop_steps + 1 :], 0.0, atol=1.0e-2 * decrement)
 
 
-def _build_loaded_pin(friction: float, friction_load: float) -> newton.Model:
+def _build_loaded_pin(friction: float, friction_load: float, radial_force_limit: float = float("inf")) -> newton.Model:
     """A body hanging under gravity on a horizontal revolute joint through its CoM: its weight loads the pin
     radially and exerts no torque about the axis."""
     builder = newton.ModelBuilder()
@@ -709,6 +709,7 @@ def _build_loaded_pin(friction: float, friction_load: float) -> newton.Model:
     builder.end_world()
     model = builder.finalize()
     model.joint_friction_load.assign([friction_load])
+    model.joint_friction_radial_force_limit.assign([radial_force_limit])
     return model
 
 
@@ -732,6 +733,18 @@ class TestSolverKaminoJointFrictionLoad(unittest.TestCase):
         np.testing.assert_allclose(velocities, 0.0, atol=1.0e-6)
         self.assertAlmostEqual(friction_torques[-1, 0], -held_torque, delta=1.0e-3)
         _, _, velocities, friction_torques = _rollout(solver, model, state, steps=5, dt=DT, joint_force=bound + 1.0)
+        self.assertTrue(np.all(velocities > 0.0))
+        np.testing.assert_allclose(friction_torques[:, 0], -bound, atol=1.0e-2, rtol=0.0)
+
+    def test_radial_force_limit_caps_the_friction_bound(self):
+        """The radial force that raises the friction bound is capped at joint_friction_radial_force_limit."""
+        friction, friction_load, radial_force_limit = 0.1, 0.1, 2.0
+        bound = friction + friction_load * radial_force_limit
+        model = _build_loaded_pin(friction, friction_load, radial_force_limit)
+        solver = SolverKamino(model, make_padmm_dense_config())
+        state = _initialize_state(model)
+        state, *_ = _rollout(solver, model, state, steps=5, dt=DT, joint_force=0.0)
+        _, _, velocities, friction_torques = _rollout(solver, model, state, steps=5, dt=DT, joint_force=bound + 0.2)
         self.assertTrue(np.all(velocities > 0.0))
         np.testing.assert_allclose(friction_torques[:, 0], -bound, atol=1.0e-2, rtol=0.0)
 

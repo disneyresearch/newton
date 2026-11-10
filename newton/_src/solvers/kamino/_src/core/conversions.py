@@ -1619,6 +1619,14 @@ def _validate_joint_friction_load(model: Model | ModelView, joint_dof_type: wp.a
             f"Joint {jid} ({model.joint_label[jid]!r}) sets joint_friction_load; only revolute joints with "
             "joint_friction > 0 have the friction constraint it bounds."
         )
+    if hasattr(model, "joint_friction_radial_force_limit"):
+        unlimited = np.flatnonzero(~(model.joint_friction_radial_force_limit.numpy()[loaded] > 0.0))
+        if unlimited.size:
+            jid = int(joint_of_dof[unlimited[0]])
+            raise ValueError(
+                f"Joint {jid} ({model.joint_label[jid]!r}) sets joint_friction_load with a "
+                "joint_friction_radial_force_limit that is not positive."
+            )
 
 
 def _validate_model_joint_pd_gains(model: Model | ModelView) -> None:
@@ -2140,6 +2148,11 @@ def convert_joints(
         f_j=model.joint_friction,
         f_load_j=(
             model.joint_friction_load if hasattr(model, "joint_friction_load") else wp.zeros_like(model.joint_friction)
+        ),
+        f_load_force_max_j=(
+            model.joint_friction_radial_force_limit
+            if hasattr(model, "joint_friction_radial_force_limit")
+            else wp.full_like(model.joint_friction, float("inf"))
         ),
         k_p_j=model.joint_target_ke,
         k_d_j=model.joint_target_kd,

@@ -679,6 +679,7 @@ def _build_joint_friction_bounds(
     model_info_joint_bounded_cts_offset: wp.array[wp.int32],
     model_joints_f_j: wp.array[wp.float32],
     model_joints_f_load_j: wp.array[wp.float32],
+    model_joints_f_load_force_max_j: wp.array[wp.float32],
     model_joints_dof_type: wp.array[wp.int32],
     model_joints_kinematic_cts_offset: wp.array[wp.int32],
     data_joints_lambda_kin_j: wp.array[wp.float32],
@@ -689,7 +690,8 @@ def _build_joint_friction_bounds(
     """Build per-row Coulomb joint friction impulse bounds.
 
     A revolute joint's bound adds its load-dependent friction times the radial force of the step
-    before: its kinematic constraint forces along the two axes normal to the rotation axis.
+    before, its kinematic constraint forces along the two axes normal to the rotation axis, capped at
+    the DoF's radial force limit.
     """
     jid = wp.tid()
     wid = model_joints_wid[jid]
@@ -706,7 +708,10 @@ def _build_joint_friction_bounds(
             kin = model_joints_kinematic_cts_offset[jid]
             radial_y = data_joints_lambda_kin_j[kin + 1]
             radial_z = data_joints_lambda_kin_j[kin + 2]
-            friction += model_joints_f_load_j[dof_start + axis] * wp.sqrt(radial_y * radial_y + radial_z * radial_z)
+            radial = wp.min(
+                wp.sqrt(radial_y * radial_y + radial_z * radial_z), model_joints_f_load_force_max_j[dof_start + axis]
+            )
+            friction += model_joints_f_load_j[dof_start + axis] * radial
         bound = dt * friction
         problem_bound_lower[row_start + j] = -bound
         problem_bound_upper[row_start + j] = bound
@@ -1955,6 +1960,7 @@ class DualProblem:
                         model.info.joint_bounded_cts_offset,
                         model.joints.f_j,
                         model.joints.f_load_j,
+                        model.joints.f_load_force_max_j,
                         model.joints.dof_type,
                         model.joints.kinematic_cts_offset,
                         data.joints.lambda_kin_j,

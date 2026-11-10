@@ -1389,6 +1389,11 @@ class JointsModel:
     Only revolute DoFs with ``f_j > 0`` may set it. Shape: ``(sum_of_num_joint_dofs,)``.
     """
 
+    f_load_force_max_j: wp.array[wp.float32] | None = None
+    """
+    Largest radial force [N] that ``f_load_j`` multiplies. Shape: ``(sum_of_num_joint_dofs,)``.
+    """
+
     k_p_j: wp.array[wp.float32] | None = None
     """
     Implicit PD-control proportional gain of each joint (as flat array).
