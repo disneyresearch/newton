@@ -1586,6 +1586,20 @@ class SolverKamino(SolverBase, CouplingInterface):
                 default=0.0,
             )
         )
+        # Registering entries for joint dynamics, joint friction, and effort limit rows.
+        # Since the actual required size is not known in advance until the solver is constructed,
+        # the entries are registered conservatively for each joint DoF. Only the leading entries are
+        # used by the solver.
+        for name in ("joint_lambdas_dyn", "joint_lambdas_f", "joint_lambdas_tau"):
+            builder.add_custom_attribute(
+                ModelBuilder.CustomAttribute(
+                    name=name,
+                    assignment=Model.AttributeAssignment.STATE,
+                    frequency=Model.AttributeFrequency.JOINT_DOF,
+                    dtype=wp.float32,
+                    default=0.0,
+                )
+            )
         # Register FK custom actuation types
         builder.add_custom_attribute(
             ModelBuilder.CustomAttribute(

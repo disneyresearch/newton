@@ -27,6 +27,33 @@ __all__ = [
 ###
 
 
+def _alias_multiplier_rows(state: State, name: str, count: int, device: wp.DeviceLike) -> wp.array:
+    """Return ``count`` multiplier rows aliasing the leading entries of a state attribute, if
+    present, or referencing a newly created array.
+
+    The attribute should be register per joint DoF, a conservative upper bound on the row count,
+    through :meth:`SolverKamino.register_custom_attributes`, and already allocated in the state.
+    This ensures that the allocation does not fall into a potentially graph-captured region.
+    If the attribute is not present, it will be created by te function.
+
+    Args:
+        state: The Newton state holding the attribute.
+        name: Name of the state attribute.
+        count: Number of multiplier rows.
+        device: Device used when the attribute must be allocated.
+
+    Returns:
+        A zero-copy view of the first ``count`` entries, or a new array attached to ``state``
+        when the attribute is missing or too small.
+    """
+    array = getattr(state, name, None)
+    if isinstance(array, wp.array) and array.ndim == 1 and array.dtype == wp.float32 and array.size >= count:
+        return array if array.size == count else array[:count]
+    array = wp.zeros(shape=(count,), dtype=wp.float32, device=device)
+    setattr(state, name, array)
+    return array
+
+
 @dataclass
 class StateKamino:
     """
@@ -309,38 +336,10 @@ class StateKamino:
             lambda_kin_j = wp.zeros(shape=(size.sum_of_num_kinematic_joint_cts,), dtype=wp.float32, device=device)
             state.joint_lambdas = lambda_kin_j
 
-        # Retrieve or allocate multipliers for joint dynamic constraints
-        if (
-            hasattr(state, "joint_lambdas_dyn")
-            and state.joint_lambdas_dyn is not None
-            and state.joint_lambdas_dyn.shape == (size.sum_of_num_dynamic_joint_cts,)
-        ):
-            lambda_dyn_j = state.joint_lambdas_dyn
-        else:
-            lambda_dyn_j = wp.zeros(shape=(size.sum_of_num_dynamic_joint_cts,), dtype=wp.float32, device=device)
-            state.joint_lambdas_dyn = lambda_dyn_j
-
-        # Retrieve or allocate multipliers for joint friction constraints
-        if (
-            hasattr(state, "joint_lambdas_f")
-            and state.joint_lambdas_f is not None
-            and state.joint_lambdas_f.shape == (size.sum_of_num_friction_joint_cts,)
-        ):
-            lambda_f_j = state.joint_lambdas_f
-        else:
-            lambda_f_j = wp.zeros(shape=(size.sum_of_num_friction_joint_cts,), dtype=wp.float32, device=device)
-            state.joint_lambdas_f = lambda_f_j
-
-        # Retrieve or allocate multipliers for effort-limit implicit-PD constraints
-        if (
-            hasattr(state, "joint_lambdas_tau")
-            and state.joint_lambdas_tau is not None
-            and state.joint_lambdas_tau.shape == (size.sum_of_num_effort_joint_cts,)
-        ):
-            lambda_tau_j = state.joint_lambdas_tau
-        else:
-            lambda_tau_j = wp.zeros(shape=(size.sum_of_num_effort_joint_cts,), dtype=wp.float32, device=device)
-            state.joint_lambdas_tau = lambda_tau_j
+        # Retrieve or allocate multipliers for the joint dynamic, friction, and effort-limit constraints
+        lambda_dyn_j = _alias_multiplier_rows(state, "joint_lambdas_dyn", size.sum_of_num_dynamic_joint_cts, device)
+        lambda_f_j = _alias_multiplier_rows(state, "joint_lambdas_f", size.sum_of_num_friction_joint_cts, device)
+        lambda_tau_j = _alias_multiplier_rows(state, "joint_lambdas_tau", size.sum_of_num_effort_joint_cts, device)
 
         # Optionally initialize the `joint_q_prev` array to match the current `joint_q`
         if initialize_state_prev:

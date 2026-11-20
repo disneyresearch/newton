@@ -1,0 +1,1 @@
+Fix `SolverKamino` leaving joint multiplier arrays owned by the first CUDA graph that captures a step on a fresh `State`, which caused illegal memory accesses once that graph was destroyed and a recaptured graph was launched.

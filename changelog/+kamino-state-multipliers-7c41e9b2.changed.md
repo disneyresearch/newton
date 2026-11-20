@@ -1,0 +1,1 @@
+Allocate the `SolverKamino` state attributes `joint_lambdas_dyn`, `joint_lambdas_f` and `joint_lambdas_tau` in `Model.state()` with one entry per joint DOF when `SolverKamino.register_custom_attributes()` is used; the constraint rows occupy the leading entries.
