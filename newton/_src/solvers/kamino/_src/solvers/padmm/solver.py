@@ -191,6 +191,7 @@ class PADMMSolver:
         self._use_adaptive_penalty: bool = False
         self._use_graph_conditionals: bool = True
         self._collect_info: bool = False
+        self._info_world_mask: wp.array[wp.bool] | None = None
 
         # Declare the model size cache
         self._size: SizeKamino | None = None
@@ -353,6 +354,12 @@ class PADMMSolver:
             collect_info=self._collect_info,
             device=self._device,
         )
+
+        # Solver info is collected inside the iteration loop, which may be a
+        # conditional graph body where allocation is not allowed.
+        self._info_world_mask = None
+        if self._collect_info:
+            self._info_world_mask = wp.ones((self._size.num_worlds,), dtype=wp.bool, device=self._device)
 
         # Write algorithm configs into device memory
         configs = [convert_config_to_struct(c) for c in self._config]
@@ -1542,7 +1549,7 @@ class PADMMSolver:
             problem.delassus.gemv(
                 x=self._data.state.y,
                 y=self._data.info.v_plus,
-                world_mask=wp.ones((problem.data.num_worlds,), dtype=wp.bool, device=self.device),
+                world_mask=self._info_world_mask,
                 alpha=1.0,
                 beta=1.0,
             )

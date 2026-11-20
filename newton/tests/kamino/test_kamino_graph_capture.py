@@ -12,7 +12,7 @@ import warp as wp
 import newton
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton.tests.kamino import setup_test_output, setup_tests, test_context
-from newton.tests.kamino.utils.solver_configs import make_padmm_dense_config
+from newton.tests.kamino.utils.solver_configs import make_padmm_dense_config, make_padmm_sparse_config
 from newton.tests.unittest_utils import NewtonTestCase
 
 DT = 0.002
@@ -44,9 +44,9 @@ def _build_model() -> newton.Model:
     return model
 
 
-def _make_simulation(model: newton.Model):
+def _make_simulation(model: newton.Model, config: SolverKamino.Config):
     """Create a never-stepped solver with fresh ping-pong states."""
-    solver = SolverKamino(model, make_padmm_dense_config())
+    solver = SolverKamino(model, config)
     state_0, state_1 = model.state(), model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
     control = model.control()
@@ -66,20 +66,46 @@ class TestKaminoGraphCapture(NewtonTestCase):
         if not test_context.setup_done:
             setup_tests(clear_cache=False)
 
+    def test_first_use_capture_and_replay(self):
+        """Capture the first-ever steps of a solver and replay them."""
+        if not wp.get_device().is_cuda:
+            self.skipTest("CUDA graph capture requires a CUDA device")
+        if not wp.is_conditional_graph_supported():
+            self.skipTest("The captured solver loops require conditional CUDA graphs")
+        model = _build_model()
+        # Each configuration allocates or branches differently on its first captured step.
+        configs = {
+            "padmm_sparse_solver_info": lambda: make_padmm_sparse_config(collect_solver_info=True),
+        }
+        for name, config_factory in configs.items():
+            with self.subTest(config=name):
+                solver, state_0, state_1, control = _make_simulation(model, config_factory())
+                for _ in range(2):
+                    _step_twice(solver, state_0, state_1, control)
+                expected_qd = state_0.joint_qd.numpy()
+                self.assertTrue(np.all(np.abs(expected_qd) > 1.0e-3))
+
+                solver, state_0, state_1, control = _make_simulation(model, config_factory())
+                with wp.ScopedCapture() as capture:
+                    _step_twice(solver, state_0, state_1, control)
+                for _ in range(2):
+                    wp.capture_launch(capture.graph)
+                np.testing.assert_allclose(state_0.joint_qd.numpy(), expected_qd, rtol=1.0e-4, atol=1.0e-6)
+
     def test_graph_replacement_on_fresh_states(self):
         """Replay a recaptured graph after the first, never-launched capture is destroyed."""
         if not wp.get_device().is_cuda:
             self.skipTest("CUDA graph capture requires a CUDA device")
         model = _build_model()
 
-        solver, state_0, state_1, control = _make_simulation(model)
+        solver, state_0, state_1, control = _make_simulation(model, make_padmm_dense_config())
         for _ in range(2):
             _step_twice(solver, state_0, state_1, control)
         expected_qd = state_0.joint_qd.numpy()
         expected_effort = state_0.joint_lambdas_tau.numpy()
         self.assertTrue(np.all(np.abs(expected_qd) > 1.0e-3))
 
-        solver, state_0, state_1, control = _make_simulation(model)
+        solver, state_0, state_1, control = _make_simulation(model, make_padmm_dense_config())
         with wp.ScopedCapture() as discarded:
             _step_twice(solver, state_0, state_1, control)
         with wp.ScopedCapture() as capture:

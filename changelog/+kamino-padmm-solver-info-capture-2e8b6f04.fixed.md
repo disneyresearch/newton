@@ -1,0 +1,1 @@
+Fix `SolverKamino` failing to capture a CUDA graph with the PADMM solver, sparse dynamics and `collect_solver_info=True`, where solver-info collection allocated memory inside a conditional graph body.
