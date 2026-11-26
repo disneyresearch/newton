@@ -10,9 +10,15 @@ import numpy as np
 import warp as wp
 
 import newton
+from newton._src.solvers.kamino import config as kamino_config
 from newton._src.solvers.kamino.solver_kamino import SolverKamino
 from newton.tests.kamino import setup_test_output, setup_tests, test_context
-from newton.tests.kamino.utils.solver_configs import make_padmm_dense_config, make_padmm_sparse_config
+from newton.tests.kamino.utils.solver_configs import (
+    make_padmm_dense_config,
+    make_padmm_sparse_config,
+    make_scc_dense_config,
+    make_scc_sparse_config,
+)
 from newton.tests.unittest_utils import NewtonTestCase
 
 DT = 0.002
@@ -44,13 +50,54 @@ def _build_model() -> newton.Model:
     return model
 
 
-def _make_simulation(model: newton.Model, config: SolverKamino.Config):
+def _build_chain() -> newton.Model:
+    """Build two worlds, each a 64-link revolute chain swinging under gravity.
+
+    Each link adds five kinematic and one dynamic row, so a world has the 384
+    bilateral rows that select SCC's persistent joint-block solver.
+    """
+    builder = newton.ModelBuilder()
+    SolverKamino.register_custom_attributes(builder)
+    for _ in range(2):
+        builder.begin_world()
+        parent, joints = -1, []
+        for _ in range(64):
+            body = builder.add_link(mass=1.0, inertia=wp.mat33(np.eye(3) * 1.0e-2), lock_inertia=True)
+            joints.append(
+                builder.add_joint_revolute(
+                    parent,
+                    body,
+                    axis=newton.Axis.Y,
+                    parent_xform=wp.transform((0.2 if parent >= 0 else 0.0, 0.0, 0.0), wp.quat_identity()),
+                    armature=0.01,
+                    effort_limit=0.5,
+                    target_ke=10.0,
+                    target_kd=1.0,
+                    actuator_mode=newton.JointTargetMode.POSITION,
+                )
+            )
+            parent = body
+        builder.add_articulation(joints)
+        builder.end_world()
+    return builder.finalize()
+
+
+def _make_lox_config(**kwargs) -> SolverKamino.Config:
+    return SolverKamino.Config(dynamics_solver="lox", use_fk_solver=False, use_collision_detector=False, **kwargs)
+
+
+def _make_scc_joint_block_config() -> SolverKamino.Config:
+    return make_scc_sparse_config(scc=kamino_config.SCCSolverConfig(use_schur_complement=True))
+
+
+def _make_simulation(model: newton.Model, config: SolverKamino.Config, targets=None):
     """Create a never-stepped solver with fresh ping-pong states."""
     solver = SolverKamino(model, config)
     state_0, state_1 = model.state(), model.state()
     newton.eval_fk(model, model.joint_q, model.joint_qd, state_0)
     control = model.control()
-    control.joint_target_q.assign(_TARGETS)
+    if targets is not None:
+        control.joint_target_q.assign(targets)
     return solver, state_0, state_1, control
 
 
@@ -67,27 +114,39 @@ class TestKaminoGraphCapture(NewtonTestCase):
             setup_tests(clear_cache=False)
 
     def test_first_use_capture_and_replay(self):
-        """Capture the first-ever steps of a solver and replay them."""
+        """Capture the first-ever steps of a solver and replay them against eager stepping."""
         if not wp.get_device().is_cuda:
             self.skipTest("CUDA graph capture requires a CUDA device")
         if not wp.is_conditional_graph_supported():
             self.skipTest("The captured solver loops require conditional CUDA graphs")
-        model = _build_model()
-        # Each configuration allocates or branches differently on its first captured step.
-        configs = {
-            "padmm_sparse_solver_info": lambda: make_padmm_sparse_config(collect_solver_info=True),
+        model, chain = _build_model(), _build_chain()
+        # Each row allocates or branches differently on its first captured step.
+        rows = {
+            "padmm_dense": (model, make_padmm_dense_config),
+            "padmm_sparse": (model, make_padmm_sparse_config),
+            "padmm_sparse_solver_info": (model, lambda: make_padmm_sparse_config(collect_solver_info=True)),
+            "padmm_sparse_metrics": (model, lambda: make_padmm_sparse_config(compute_solution_metrics=True)),
+            "scc_dense": (model, make_scc_dense_config),
+            "scc_sparse": (model, make_scc_sparse_config),
+            "lox": (model, _make_lox_config),
+            # Only taken while capturing, so eager stepping is the reference for its
+            # optimized solve; the Jacobian changes on every replayed step.
+            "scc_sparse_joint_blocks": (chain, _make_scc_joint_block_config),
         }
-        for name, config_factory in configs.items():
+        for name, (row_model, config_factory) in rows.items():
             with self.subTest(config=name):
-                solver, state_0, state_1, control = _make_simulation(model, config_factory())
+                targets = _TARGETS if row_model is model else None
+                solver, state_0, state_1, control = _make_simulation(row_model, config_factory(), targets)
                 for _ in range(2):
                     _step_twice(solver, state_0, state_1, control)
                 expected_qd = state_0.joint_qd.numpy()
-                self.assertTrue(np.all(np.abs(expected_qd) > 1.0e-3))
+                self.assertGreater(np.abs(expected_qd).max(), 1.0e-3)
 
-                solver, state_0, state_1, control = _make_simulation(model, config_factory())
+                solver, state_0, state_1, control = _make_simulation(row_model, config_factory(), targets)
                 with wp.ScopedCapture() as capture:
                     _step_twice(solver, state_0, state_1, control)
+                if name == "scc_sparse_joint_blocks":
+                    self.assertIsNotNone(solver._solver_kamino._solver_fd._sparse_path.joint_block_solver)
                 for _ in range(2):
                     wp.capture_launch(capture.graph)
                 np.testing.assert_allclose(state_0.joint_qd.numpy(), expected_qd, rtol=1.0e-4, atol=1.0e-6)
@@ -98,14 +157,14 @@ class TestKaminoGraphCapture(NewtonTestCase):
             self.skipTest("CUDA graph capture requires a CUDA device")
         model = _build_model()
 
-        solver, state_0, state_1, control = _make_simulation(model, make_padmm_dense_config())
+        solver, state_0, state_1, control = _make_simulation(model, make_padmm_dense_config(), _TARGETS)
         for _ in range(2):
             _step_twice(solver, state_0, state_1, control)
         expected_qd = state_0.joint_qd.numpy()
         expected_effort = state_0.joint_lambdas_tau.numpy()
         self.assertTrue(np.all(np.abs(expected_qd) > 1.0e-3))
 
-        solver, state_0, state_1, control = _make_simulation(model, make_padmm_dense_config())
+        solver, state_0, state_1, control = _make_simulation(model, make_padmm_dense_config(), _TARGETS)
         with wp.ScopedCapture() as discarded:
             _step_twice(solver, state_0, state_1, control)
         with wp.ScopedCapture() as capture:

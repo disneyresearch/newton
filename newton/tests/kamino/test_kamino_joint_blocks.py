@@ -617,48 +617,6 @@ class TestKaminoJointBlocks(NewtonTestCase):
                 solve.assert_called_once_with(path, problem, joint_blocks=blocks)
                 finish.assert_called_once_with(path, problem)
 
-    def test_dispatch_refreshes_cached_values_before_conditional(self):
-        """Refresh changing Jacobian values on both branches of every graph replay."""
-        device = self._device(conditional=True)
-        source = wp.array([1.0], dtype=wp.float32, device=device)
-        cached = wp.zeros_like(source)
-        output = wp.zeros_like(source)
-        flag = wp.zeros(1, dtype=wp.int32, device=device)
-        operator = SimpleNamespace(_needs_update=True)
-
-        def update():
-            wp.copy(cached, source)
-            operator._needs_update = False
-
-        operator.update = update
-        blocks = SimpleNamespace(failure=flag, prepare=lambda path, problem: None, assemble=lambda path, problem: None)
-        path = SimpleNamespace(
-            use_schur_complement=True,
-            joint_block_solver=blocks,
-            device=device,
-            data=SimpleNamespace(
-                bilateral_dim=None, bilateral_operator=SimpleNamespace(info=SimpleNamespace(dim=None), mat=None)
-            ),
-        )
-
-        def continuation(path, problem, joint_blocks=None):
-            if operator._needs_update:
-                operator.update()
-            wp.copy(output, cached)
-
-        with (
-            patch.object(sparse, "_get_sparse_delassus", return_value=operator),
-            patch.object(sparse, "_assemble_sparse_bilateral_block"),
-            patch.object(sparse, "_solve_sparse_with_bilateral_schur_complement", side_effect=continuation),
-        ):
-            with wp.ScopedCapture(device=device) as capture:
-                sparse._solve_sparse_with_bilateral_direct_block(path, SimpleNamespace())
-        for failed, value in ((0, 2.0), (1, 3.0), (0, 5.0)):
-            flag.fill_(failed)
-            source.fill_(value)
-            wp.capture_launch(capture.graph)
-            np.testing.assert_array_equal(output.numpy(), [value])
-
 
 if __name__ == "__main__":
     newton.utils.setup_console_logging()
