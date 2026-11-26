@@ -82,6 +82,38 @@ def _build_chain() -> newton.Model:
     return builder.finalize()
 
 
+def _build_large_batch() -> newton.Model:
+    """Build 2048 worlds, each an 8-link effort-limited revolute chain swinging under gravity.
+
+    Each world has 48 bilateral and 8 effort-limit rows, which selects SCC's
+    nonpersistent joint-block solver with packed coupling and effort-limit condensation.
+    """
+    chain = newton.ModelBuilder()
+    SolverKamino.register_custom_attributes(chain)
+    parent, joints = -1, []
+    for _ in range(8):
+        body = chain.add_link(mass=1.0, inertia=wp.mat33(np.eye(3) * 1.0e-2), lock_inertia=True)
+        joints.append(
+            chain.add_joint_revolute(
+                parent,
+                body,
+                axis=newton.Axis.Y,
+                parent_xform=wp.transform((0.2 if parent >= 0 else 0.0, 0.0, 0.0), wp.quat_identity()),
+                armature=0.01,
+                effort_limit=0.5,
+                target_ke=10.0,
+                target_kd=1.0,
+                actuator_mode=newton.JointTargetMode.POSITION,
+            )
+        )
+        parent = body
+    chain.add_articulation(joints)
+    builder = newton.ModelBuilder()
+    SolverKamino.register_custom_attributes(builder)
+    builder.replicate(chain, 2048)
+    return builder.finalize()
+
+
 def _make_lox_config(**kwargs) -> SolverKamino.Config:
     return SolverKamino.Config(dynamics_solver="lox", use_fk_solver=False, use_collision_detector=False, **kwargs)
 
@@ -119,7 +151,7 @@ class TestKaminoGraphCapture(NewtonTestCase):
             self.skipTest("CUDA graph capture requires a CUDA device")
         if not wp.is_conditional_graph_supported():
             self.skipTest("The captured solver loops require conditional CUDA graphs")
-        model, chain = _build_model(), _build_chain()
+        model, chain, large_batch = _build_model(), _build_chain(), _build_large_batch()
         # Each row allocates or branches differently on its first captured step.
         rows = {
             "padmm_dense": (model, make_padmm_dense_config),
@@ -132,6 +164,7 @@ class TestKaminoGraphCapture(NewtonTestCase):
             # Only taken while capturing, so eager stepping is the reference for its
             # optimized solve; the Jacobian changes on every replayed step.
             "scc_sparse_joint_blocks": (chain, _make_scc_joint_block_config),
+            "scc_sparse_joint_blocks_large_batch": (large_batch, _make_scc_joint_block_config),
         }
         for name, (row_model, config_factory) in rows.items():
             with self.subTest(config=name):
@@ -145,8 +178,13 @@ class TestKaminoGraphCapture(NewtonTestCase):
                 solver, state_0, state_1, control = _make_simulation(row_model, config_factory(), targets)
                 with wp.ScopedCapture() as capture:
                     _step_twice(solver, state_0, state_1, control)
-                if name == "scc_sparse_joint_blocks":
-                    self.assertIsNotNone(solver._solver_kamino._solver_fd._sparse_path.joint_block_solver)
+                if name.startswith("scc_sparse_joint_blocks"):
+                    path = solver._solver_kamino._solver_fd._sparse_path
+                    self.assertIsNotNone(path.joint_block_solver)
+                    large_batch_paths = name.endswith("large_batch")
+                    self.assertEqual(path.joint_block_solver._persistent, not large_batch_paths)
+                    self.assertEqual(path.packed_coupling is not None, large_batch_paths)
+                    self.assertEqual(path.effort_limit_condensation is not None, large_batch_paths)
                 for _ in range(2):
                     wp.capture_launch(capture.graph)
                 np.testing.assert_allclose(state_0.joint_qd.numpy(), expected_qd, rtol=1.0e-4, atol=1.0e-6)
